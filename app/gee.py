@@ -38,6 +38,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "download_chips": True,
     "sensors": ["s2", "l8", "l9"],
     "thumb_px": 1120,
+    "segment_lru_scenes": 3,
     "port": 8137,
 }
 

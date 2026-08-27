@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 data/chips/
+models/*.pt
+data/scene_cache/

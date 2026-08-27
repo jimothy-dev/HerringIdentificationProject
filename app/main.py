@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import gee
+from app import gee, segment
 from app.labels import VALID_LABELS, LabelStore
 from app.records import RecordStore, SpawnRecord
 
@@ -263,6 +263,50 @@ def api_delete_label(record_id: str = Query(...), scene_id: str = Query(...)) ->
 @app.get("/api/labels")
 def api_get_labels(record_id: str | None = Query(default=None)) -> dict:
     return {"labels": label_store.all_rows(record_id)}
+
+
+# ------------------------------------------------------------------ segment
+
+class SegmentPoint(BaseModel):
+    x: float  # normalized 0-1 in true-color thumb image space
+    y: float
+    label: Literal[0, 1]  # 1 = foreground, 0 = background/exclude
+
+
+class SegmentIn(BaseModel):
+    record_id: str
+    scene_id: str
+    sensor: str
+    points: list[SegmentPoint]
+
+
+@app.get("/api/segment/status")
+def api_segment_status() -> dict:
+    return segment.engine().status()
+
+
+@app.post("/api/segment/warmup")
+def api_segment_warmup() -> dict:
+    return segment.engine().warmup()
+
+
+@app.post("/api/segment")
+def api_segment(body: SegmentIn) -> dict:
+    # Contract: HTTP 200 always; failures are {ok: false, state, error?, hint?}.
+    record = records_store.get(body.record_id)
+    if record is None:
+        return {
+            "ok": False,
+            "state": segment.engine().status()["state"],
+            "error": f"Unknown record id: {body.record_id}",
+            "hint": None,
+        }
+    return segment.engine().segment(
+        record=record,
+        scene_id=body.scene_id,
+        sensor=body.sensor,
+        points=[(p.x, p.y, p.label) for p in body.points],
+    )
 
 
 # --------------------------------------------------------------- mock thumb
