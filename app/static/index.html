@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Herring Spawn Labeler</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header id="app-header">
+        <h1>Herring Spawn Labeler</h1>
+        <div class="subtitle">Pacific herring &middot; satellite chip labeling</div>
+      </header>
+
+      <div id="status-strip"></div>
+      <div id="progress-line"></div>
+
+      <div id="filters">
+        <label class="filter">
+          <span>Year</span>
+          <select id="filter-year"></select>
+        </label>
+        <label class="filter">
+          <span>Region</span>
+          <select id="filter-region"></select>
+        </label>
+        <label class="filter">
+          <span>Labeled</span>
+          <select id="filter-labeled">
+            <option value="all">All</option>
+            <option value="unlabeled">Unlabeled</option>
+            <option value="labeled">Labeled</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="record-list"></div>
+
+      <div id="pagination">
+        <button id="page-prev" class="btn ghost" type="button">&#8249; Prev</button>
+        <span id="page-info"></span>
+        <button id="page-next" class="btn ghost" type="button">Next &#8250;</button>
+      </div>
+
+      <footer id="key-help">
+        <span><kbd>P</kbd><kbd>N</kbd><kbd>U</kbd><kbd>X</kbd><kbd>C</kbd> label</span>
+        <span><kbd>&#8592;</kbd><kbd>&#8594;</kbd> scenes</span>
+        <span><kbd>J</kbd><kbd>K</kbd> records</span>
+        <span><kbd>F</kbd> false color</span>
+        <span><kbd>M</kbd> mode</span>
+      </footer>
+    </aside>
+
+    <main id="main">
+      <div id="main-empty" class="empty-state">
+        <div class="empty-icon">&#9678;</div>
+        <p>Select a spawn record from the list to load satellite scenes.</p>
+        <p class="empty-hint">Herring milt shows as milky turquoise water hugging the shoreline,
+          typically visible for 1&ndash;5 days around the recorded spawn start date.</p>
+      </div>
+
+      <section id="record-view" hidden>
+        <header id="record-header"></header>
+
+        <div id="mode-row">
+          <div id="mode-toggle">
+            <button id="mode-spawn" class="mode-btn active" type="button">Spawn window</button>
+            <button id="mode-offseason" class="mode-btn" type="button">Off-season (negatives)</button>
+          </div>
+          <span id="window-label" title="Imagery query window"></span>
+        </div>
+
+        <div id="scenes-loading" hidden>
+          <div class="spinner"></div>
+          <span>Querying Earth Engine&hellip; this can take 5&ndash;20&nbsp;seconds</span>
+        </div>
+
+        <div id="scenes-error" class="error-card" hidden></div>
+
+        <div id="filmstrip" hidden></div>
+
+        <div id="viewer" hidden>
+          <div id="viewer-meta"></div>
+          <div id="viewer-img-wrap"><img id="viewer-img" alt="Selected satellite scene"></div>
+          <div id="label-bar">
+            <button id="scene-prev" class="btn nav" type="button" title="Previous scene (&#8592;)">&#9664;</button>
+            <div id="label-btns">
+              <button class="label-btn positive" data-label="positive" type="button">Positive <kbd>P</kbd></button>
+              <button class="label-btn negative" data-label="negative" type="button">Negative <kbd>N</kbd></button>
+              <button class="label-btn unsure" data-label="unsure" type="button">Unsure <kbd>U</kbd></button>
+              <button class="label-btn unusable" data-label="unusable" type="button">Unusable <kbd>X</kbd></button>
+              <button class="label-btn clear" id="btn-clear" type="button">Clear <kbd>C</kbd></button>
+            </div>
+            <input id="notes-input" type="text" placeholder="notes (optional)" autocomplete="off" spellcheck="false">
+            <button id="scene-next" class="btn nav" type="button" title="Next scene (&#8594;)">&#9654;</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

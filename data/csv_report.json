@@ -1,0 +1,207 @@
+{
+  "csv_path": "C:/Users/James/Documents/HerringIdentificationProject/data/Pacific_herring_spawn_index_data_2025_EN.csv",
+  "generated": "2026-08-27T13:25:35",
+  "encoding": {
+    "detected": "utf-8",
+    "utf8_bom": false
+  },
+  "total_rows_all_years": 31167,
+  "rows_year_ge_2016": 3118,
+  "usable_rows_2016": 3066,
+  "id_uniqueness": {
+    "id_format": "{Year}_{LocationCode}_{SpawnNumber}",
+    "n_colliding_id_values": 0,
+    "n_rows_involved_in_collisions": 0,
+    "n_extra_rows_needing_suffix": 0,
+    "examples": {}
+  },
+  "dates": {
+    "startdate_na_literal": 28,
+    "startdate_other_unparseable": 0,
+    "enddate_na_literal": 28,
+    "enddate_other_unparseable": 0,
+    "enddate_before_startdate": 2,
+    "enddate_before_startdate_examples": [
+      {
+        "rid": "2025_1265_1",
+        "StartDate": "2025-03-28",
+        "EndDate": "2025-03-03"
+      },
+      {
+        "rid": "2025_1266_1",
+        "StartDate": "2025-03-28",
+        "EndDate": "2025-03-03"
+      }
+    ],
+    "duration_days": {
+      "n_with_both_dates": 3090,
+      "min_days": -25,
+      "median_days": 1.0,
+      "p90_days": 4.0,
+      "max_days": 82
+    },
+    "longest_durations": [
+      {
+        "rid": "2016_1217_1",
+        "StartDate": "2016-01-07",
+        "EndDate": "2016-03-29",
+        "dur": 82
+      },
+      {
+        "rid": "2025_781_127",
+        "StartDate": "2025-03-28",
+        "EndDate": "2025-04-29",
+        "dur": 32
+      },
+      {
+        "rid": "2025_1262_1",
+        "StartDate": "2025-02-28",
+        "EndDate": "2025-03-28",
+        "dur": 28
+      },
+      {
+        "rid": "2016_1327_1",
+        "StartDate": "2016-02-20",
+        "EndDate": "2016-03-17",
+        "dur": 26
+      },
+      {
+        "rid": "2022_757_1",
+        "StartDate": "2022-04-24",
+        "EndDate": "2022-05-08",
+        "dur": 14
+      }
+    ],
+    "startdate_month_distribution": {
+      "1": 25,
+      "2": 85,
+      "3": 2017,
+      "4": 943,
+      "5": 19,
+      "12": 1
+    },
+    "startdates_outside_feb_may": 26,
+    "startdate_year_mismatch_vs_year_column": 1
+  },
+  "length_m": {
+    "na_literal": 213,
+    "empty": 0,
+    "other_unparseable": 0,
+    "n_numeric": 2905,
+    "min": 5.0,
+    "median": 900.0,
+    "p90": 4000.0,
+    "max": 12950.0,
+    "n_zero": 0,
+    "n_negative": 0,
+    "n_gt_20km": 0,
+    "gt_20km_examples": []
+  },
+  "width_m": {
+    "na_literal": 275,
+    "empty": 0,
+    "other_unparseable": 0,
+    "n_numeric": 2843,
+    "min": 1.0,
+    "median": 46.0,
+    "p90": 233.64242424242423,
+    "max": 2288.333333333333,
+    "n_zero": 0,
+    "n_negative": 0,
+    "n_gt_2km": 1,
+    "widest_examples": [
+      {
+        "rid": "2023_1788_1",
+        "LocationName": "Hesquiat Pt",
+        "Length": "1400",
+        "Width": "2288.3333333333335"
+      },
+      {
+        "rid": "2020_263_177",
+        "LocationName": "Tree Bluff",
+        "Length": "350",
+        "Width": "1463"
+      },
+      {
+        "rid": "2020_263_176",
+        "LocationName": "Tree Bluff",
+        "Length": "350",
+        "Width": "1333"
+      },
+      {
+        "rid": "2022_1788_1",
+        "LocationName": "Hesquiat Pt",
+        "Length": "1400",
+        "Width": "1290.4"
+      },
+      {
+        "rid": "2020_263_179",
+        "LocationName": "Tree Bluff",
+        "Length": "350",
+        "Width": "1203"
+      }
+    ]
+  },
+  "coordinates": {
+    "lon_missing": 24,
+    "lat_missing": 24,
+    "rows_missing_any_coord": 24,
+    "zeros": 0,
+    "positive_longitude(swapped_sign)": 0,
+    "negative_latitude": 0,
+    "out_of_bc_bounds(lat47-56,lon-135..-121)": 0,
+    "out_of_bounds_examples": [],
+    "ranges_nonmissing": {
+      "lat_min": 48.375556,
+      "lat_max": 54.63485,
+      "lon_min": -133.013333,
+      "lon_max": -122.798333
+    }
+  },
+  "location_name": {
+    "n_with_comma": 0,
+    "n_with_double_quote": 0,
+    "n_with_single_quote": 0,
+    "n_with_newline": 0,
+    "n_with_backslash": 0,
+    "n_non_ascii": 0,
+    "non_ascii_examples": [],
+    "n_mojibake_suspect": 0,
+    "mojibake_examples": [],
+    "special_char_examples": [],
+    "n_empty": 0,
+    "n_literal_NA": 0
+  },
+  "region_values": [
+    "A27",
+    "A2W",
+    "CC",
+    "HG",
+    "NA",
+    "PRD",
+    "SoG",
+    "WCVI"
+  ],
+  "region_counts": {
+    "CC": 632,
+    "SoG": 535,
+    "HG": 520,
+    "PRD": 502,
+    "WCVI": 472,
+    "A2W": 216,
+    "NA": 187,
+    "A27": 54
+  },
+  "method_values": [
+    "Dive",
+    "Incomplete",
+    "NA",
+    "Surface"
+  ],
+  "method_counts": {
+    "Dive": 2047,
+    "Surface": 811,
+    "Incomplete": 238,
+    "NA": 22
+  }
+}

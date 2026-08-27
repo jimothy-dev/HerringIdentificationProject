@@ -1,0 +1,11 @@
+{
+  "ee_project": "",
+  "pre_days": 3,
+  "post_days": 10,
+  "max_scenes": 16,
+  "chip_min_half_m": 600,
+  "chip_max_half_m": 2500,
+  "download_chips": true,
+  "sensors": ["s2", "l8", "l9"],
+  "port": 8137
+}
