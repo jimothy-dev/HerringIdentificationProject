@@ -633,14 +633,15 @@ function renderViewer() {
     'False color ', h('kbd', null, 'F'));
   fBtn.type = 'button';
   fBtn.addEventListener('click', toggleFalseColor);
-  meta.append(
+  meta.append(...[
     h('span', 'vm-date', s.date),
     h('span', 'vm-sensor', SENSOR_NAMES[s.sensor] || s.sensor),
     daysChip(s.days_from_start),
     cloudPill(s.cloud_region_pct),
     h('span', 'vm-spacer'),
     fBtn,
-    h('span', 'vm-counter', `${state.sceneIdx + 1} / ${state.scenes.length}`));
+    h('span', 'vm-counter', `${state.sceneIdx + 1} / ${state.scenes.length}`),
+  ].filter(Boolean));
 
   const wrap = $('viewer-img-wrap');
   const img = $('viewer-img');
