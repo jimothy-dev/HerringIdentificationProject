@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chip_max_half_m": 2500,
     "download_chips": True,
     "sensors": ["s2", "l8", "l9"],
+    "thumb_px": 1120,
     "port": 8137,
 }
 
@@ -398,7 +399,7 @@ def _thumb_url(
     img = ee.Image(f"{_ASSET_PREFIX[sensor]}/{scene_index}")
     vis = dict(_VIS[(sensor, kind)])
     params: dict[str, Any] = {
-        "dimensions": 560,
+        "dimensions": int(get_config().get("thumb_px", 1120)),
         "region": _chip_region(lon, lat, length_m),
         "format": "png",
         **vis,

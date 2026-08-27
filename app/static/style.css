@@ -606,7 +606,7 @@ a:hover { text-decoration: underline; }
 
 #viewer-img-wrap {
   position: relative;
-  height: min(56vh, 620px);
+  height: min(70vh, 1100px);
   display: flex;
   align-items: center;
   justify-content: center;

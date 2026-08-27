@@ -7,5 +7,6 @@
   "chip_max_half_m": 2500,
   "download_chips": true,
   "sensors": ["s2", "l8", "l9"],
+  "thumb_px": 1120,
   "port": 8137
 }
