@@ -846,6 +846,12 @@ function toggleSegMode() {
     startSegPolling();
   } else {
     stopSegPolling();
+    // Cancel the model-loading retry loop too: with segment mode off nothing
+    // may keep POSTing /api/segment or resurrect the status poll.
+    if (seg.retryTimer) { clearTimeout(seg.retryTimer); seg.retryTimer = null; }
+    seg.retrying = false;
+    seg.pending = false;
+    seg.retryCount = 0;
   }
   const btn = document.querySelector('.seg-btn');
   if (btn) btn.classList.toggle('active', seg.active);
@@ -1029,6 +1035,7 @@ async function doSegmentRequest() {
     positionSegOverlay();
     renderSegPanel();
   } else if (data.state === 'loading' || data.state === 'cold') {
+    if (!seg.active) { seg.retrying = false; return; } // user left segment mode
     if (data.state === 'cold') segWarmup();
     startSegPolling(); // keep the badge live while we wait
     if (seg.retryCount < 5) {
@@ -1038,7 +1045,7 @@ async function doSegmentRequest() {
       renderSegPanel();
       seg.retryTimer = setTimeout(() => {
         seg.retryTimer = null;
-        if (token === seg.reqToken && seg.points.length && !seg.inFlight) {
+        if (seg.active && token === seg.reqToken && seg.points.length && !seg.inFlight) {
           doSegmentRequest();
         }
       }, 3000);

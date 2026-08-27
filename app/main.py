@@ -295,9 +295,14 @@ def api_segment(body: SegmentIn) -> dict:
     # Contract: HTTP 200 always; failures are {ok: false, state, error?, hint?}.
     record = records_store.get(body.record_id)
     if record is None:
+        # Contract: failure states are "loading"|"cold"|"error" only -- a warm
+        # engine's "ready" must not leak into an ok:false payload.
+        engine_state = segment.engine().status()["state"]
+        if engine_state not in ("cold", "loading"):
+            engine_state = "error"
         return {
             "ok": False,
-            "state": segment.engine().status()["state"],
+            "state": engine_state,
             "error": f"Unknown record id: {body.record_id}",
             "hint": None,
         }

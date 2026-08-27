@@ -74,6 +74,7 @@ clear `data/labels.csv` before starting real labeling.
 | `chip_min_half_m` | `600` | Minimum chip half-size in metres. Chip half-size is `clamp(0.35 * spawn_length + 300, min, max)`; 1200 m when the record has no length. |
 | `chip_max_half_m` | `2500` | Maximum chip half-size in metres. |
 | `download_chips` | `true` | Download a GeoTIFF chip in the background when a scene is labeled positive/negative (real EE mode only). |
+| `segment_lru_scenes` | `3` | How many scenes' SAM image embeddings stay cached on the GPU in segment mode (~50 MB each). |
 | `sensors` | `["s2","l8","l9"]` | Which sensors to search: Sentinel-2, Landsat 8, Landsat 9. |
 | `port` | `8137` | HTTP port the app listens on. |
 
@@ -115,15 +116,55 @@ data/
 | `J` / `K` | Next / previous record (crosses page boundaries) |
 | `F` | Toggle true-color / false-color view |
 | `M` | Toggle Spawn window / Off-season mode |
+| `S` | Toggle **Segment mode** (see below) |
+| `Esc` | In segment mode: clear the current points + mask |
 
 Labeling auto-advances to the next scene, and after the last scene, to the next record.
 The **Off-season** mode queries Aug 1 - Sep 15 of the same year (herring do not spawn then), which is a
 fast way to harvest guaranteed-negative examples of the same coastline.
+
+## Segment mode (SAM)
+
+Press **`S`** (or click the **Segment** button in the viewer bar) to enter segment mode. A status badge
+appears next to the button: pulsing amber *"loading SAM…"* while the model loads, green *"SAM2 · cuda"*
+when ready, red on error (hover for details).
+
+- **Click** any feature in the image — SAM outlines it and a panel below the viewer shows its area,
+  coverage, SAM IoU, timing, and a **spawn score**.
+- **Shift+click** adds a *background* (exclude) point; all accumulated points refine the same mask, so
+  use it to push the mask off land or out of a channel.
+- **`Esc`** (or the Clear button) drops the points and mask. Switching scene or record clears too.
+
+**Latency:** the first click on a new scene downloads + encodes the image (~5-30 s; slower if the thumb
+is not yet cached under `data/scene_cache/`). Every later click on that scene reuses the cached
+embedding and takes well under a second (~0.3-0.6 s measured on the RTX 3060). The last
+`segment_lru_scenes` (default 3) scenes stay encoded.
+
+**Model backends.** The engine tries **SAM 3** (`facebook/sam3`) first, then falls back to
+**SAM 2.1 small** (`facebook/sam2.1-hiera-small`, bf16 on CUDA, ~1.6 GB VRAM in use). SAM 3 is a
+*gated* model: to enable it, accept the license at https://huggingface.co/facebook/sam3, then set
+`HF_TOKEN` (or run `hf auth login`) and restart the app — until then `/api/segment/status` reports the
+SAM 2.1 fallback with exactly that hint. No CUDA GPU? SAM 2.1 runs on CPU (slower first click).
+
+**Spawn scoring — heuristic vs trained.** No classifier has been trained yet (that needs the labels
+this app collects), so the score is a **clearly-labeled spectral heuristic**, not a model: it compares
+the mask's interior against a 15 px ring just outside it on three lifts — visible brightness, NIR
+suppression (bright-visible-but-dark-NIR separates milt from whitecaps/cloud), and cyan-green
+dominance — squashed through a hand-tuned sigmoid. The panel marks it with a `heuristic` pill and an
+explanatory note; treat it as a rough hint only.
+
+Once a trained model exists, drop it at **`models/spawn_classifier.pt`** and restart — the engine
+auto-loads it and the pill switches to `model`. Interface (also documented in `models/README.txt`):
+a `torch.load`-able callable taking a float32 `(1, 4, 128, 128)` tensor — a mask-cropped
+`[R, G, B, NIR]` chip in 0-1 with out-of-mask pixels zeroed — and returning a single spawn logit.
+A broken `.pt` file falls back to the heuristic instead of breaking the app.
 
 ## Roadmap
 
 - **Phase 1 (this app):** label satellite chips around confirmed spawn records to build a supervised
   training dataset (`labels.csv` + `data/chips/`).
 - **Phase 2:** train a CNN classifier on the labeled chips to score "spawn / not spawn" on unseen imagery.
-- **Phase 3:** a SAM 3 click-to-segment app — the user clicks a suspected feature on a satellite image,
-  SAM 3 segments it, and the phase-2 classifier scores the segment as spawn / not-spawn.
+- **Phase 3 (partially done):** click-to-segment is **live** — Segment mode (`S`) segments any clicked
+  feature with SAM (2.1 today, 3 once the gated license is accepted) and scores it with the spectral
+  heuristic. **Remaining:** train the phase-2 classifier and drop it in as
+  `models/spawn_classifier.pt`, which replaces the heuristic automatically.

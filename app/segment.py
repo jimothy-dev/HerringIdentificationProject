@@ -23,6 +23,7 @@ Design rules honoured here:
 from __future__ import annotations
 
 import base64
+import gc
 import io
 import logging
 import math
@@ -127,13 +128,70 @@ def _looks_gated(exc: Exception) -> bool:
     return any(tok in text for tok in ("gated", "401", "403", "authorized", "restricted"))
 
 
+# Keep data/scene_cache/ bounded: evict oldest-by-mtime once past this cap.
+_SCENE_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _prune_scene_cache() -> None:
+    """Best-effort cache bound; called after each write, must never raise.
+
+    Drops stale MOCK_* thumbs once Earth Engine is real (real scene ids never
+    collide with mock ones), then evicts oldest files over the byte cap.
+    """
+    try:
+        files = [p for p in SCENE_CACHE_DIR.iterdir() if p.is_file()]
+        if not gee.state().mock:
+            for p in [f for f in files if "__MOCK_" in f.name]:
+                try:
+                    p.unlink()
+                    files.remove(p)
+                except OSError:
+                    pass
+        entries = []
+        total = 0
+        for p in files:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+        entries.sort()  # oldest first
+        for _mtime, size, p in entries:
+            if total <= _SCENE_CACHE_MAX_BYTES:
+                break
+            try:
+                p.unlink()
+                total -= size
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 - pruning must never break a request
+        log.debug("scene cache prune failed", exc_info=True)
+
+
 def _scene_image(record: SpawnRecord, scene_id: str, sensor: str, kind: str) -> Image.Image:
-    """True/false color thumb PNG for one scene, cached under data/scene_cache/."""
-    path = SCENE_CACHE_DIR / f"{_safe_name(record.id)}__{_safe_name(scene_id)}__{kind}.png"
+    """True/false color thumb PNG for one scene, cached under data/scene_cache/.
+
+    The cache key includes the configured thumb_px so a config change cannot
+    serve a stale-sized thumb (the contract requires the mask to match the
+    displayed thumb's WxH exactly).
+    """
+    thumb_px = int(gee.get_config().get("thumb_px", 1120))
+    path = (
+        SCENE_CACHE_DIR
+        / f"{_safe_name(record.id)}__{_safe_name(scene_id)}__{kind}__{thumb_px}.png"
+    )
     if path.exists():
-        img = Image.open(path)
-        img.load()
-        return img
+        try:
+            img = Image.open(path)
+            img.load()
+            return img
+        except Exception as exc:  # noqa: BLE001 - corrupt cache entry -> refetch
+            log.warning("corrupt cached thumb %s (%s); deleting and refetching", path, exc)
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     if gee.state().mock:
         # Lazy import: app.main imports this module, so pull the mock thumb
@@ -147,14 +205,17 @@ def _scene_image(record: SpawnRecord, scene_id: str, sensor: str, kind: str) -> 
         resp.raise_for_status()
         data = resp.content
 
+    # Decode BEFORE committing to the cache: an HTTP-200 body that is not a
+    # valid image must fail this one request, not poison the cache on disk.
+    img = Image.open(io.BytesIO(data))
+    img.load()
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".png.part")
     with open(tmp, "wb") as fh:
         fh.write(data)
     tmp.replace(path)
-
-    img = Image.open(io.BytesIO(data))
-    img.load()
+    _prune_scene_cache()
     return img
 
 
@@ -246,6 +307,26 @@ class SegmentEngine:
                 log.warning("CUDA probe failed (%s); using CPU", exc)
                 cuda_ok = False
 
+            # Release any previous engine (e.g. warmup retry after an OOM
+            # error) BEFORE loading a new one, so the reload never needs
+            # double the model VRAM. gc.collect() before empty_cache because
+            # exception/traceback/frame cycles commonly keep dead tensors
+            # alive past plain refcounting.
+            with self._infer_lock:
+                with self._state_lock:
+                    self.model = None
+                    self.processor = None
+                    self.backend = None
+                    self.device = None
+                    self.dtype = None
+                self._emb_cache.clear()
+            gc.collect()
+            if cuda_ok:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+
             attempts: list[tuple[str, str, Any]] = []
             if cuda_ok:
                 attempts.append(("sam3", "cuda", torch.bfloat16))
@@ -255,33 +336,47 @@ class SegmentEngine:
             attempts.append(("sam2", "cpu", torch.float32))
 
             sam3_hint: str | None = None
-            last_exc: Exception | None = None
+            last_err: str | None = None  # message only: keeping the exception
+            # object would pin the failed attempt's model via its traceback
             loaded = False
             for backend, device, dtype in attempts:
+                failed = False
                 try:
                     model, processor = self._load_backend(backend, device, dtype)
                 except Exception as exc:  # noqa: BLE001 - any failure -> next fallback
-                    last_exc = exc
+                    failed = True
+                    last_err = f"{type(exc).__name__}: {exc}"
                     if backend == "sam3":
                         sam3_hint = GATED_HINT if _looks_gated(exc) else (
                             f"SAM 3 load failed ({exc}); using the SAM 2.1 fallback."
                         )
                     log.warning("segment backend %s on %s failed: %s", backend, device, exc)
+                if failed:
+                    # Cleanup OUTSIDE the except block: while the handler is
+                    # active, the exception's traceback pins the frames that
+                    # hold the (partially) loaded model, so empty_cache there
+                    # could not reclaim its VRAM.
+                    gc.collect()
                     if cuda_ok:
                         try:
                             torch.cuda.empty_cache()
                         except Exception:  # noqa: BLE001
                             pass
                     continue
-                with self._state_lock:
-                    self.model = model
-                    self.processor = processor
-                    self.backend = backend
-                    self.device = device
-                    self.dtype = dtype
-                    self._state = "ready"
-                    self.error = None
-                    self.hint = sam3_hint  # gated/fallback instructions, or None
+                # Install under _infer_lock so no queued inference can observe
+                # a torn model/dtype/device combination or reuse embeddings
+                # computed by a previous backend.
+                with self._infer_lock:
+                    self._emb_cache.clear()
+                    with self._state_lock:
+                        self.model = model
+                        self.processor = processor
+                        self.backend = backend
+                        self.device = device
+                        self.dtype = dtype
+                        self._state = "ready"
+                        self.error = None
+                        self.hint = sam3_hint  # gated/fallback instructions, or None
                 log.info("segment engine ready: %s on %s (%s)", backend, device, dtype)
                 loaded = True
                 break
@@ -289,7 +384,7 @@ class SegmentEngine:
             if not loaded:
                 with self._state_lock:
                     self._state = "error"
-                    self.error = f"Model load failed: {last_exc}"
+                    self.error = f"Model load failed: {last_err}"
                     self.hint = sam3_hint or (
                         "Check network connectivity and disk space, then POST "
                         "/api/segment/warmup to retry."
@@ -396,22 +491,54 @@ class SegmentEngine:
         t0 = time.perf_counter()
         try:
             with self._infer_lock:
+                # Re-check under the inference lock: a request queued here may
+                # have crossed a state transition (OOM -> error, or a reload in
+                # progress) and must not run against a torn-down/mid-swap engine.
+                with self._state_lock:
+                    if self._state != "ready":
+                        return {
+                            "ok": False,
+                            "state": self._state,
+                            "error": self.error,
+                            "hint": self.hint,
+                        }
+
+                # OOM retry protocol: the retry must happen OUTSIDE the except
+                # block. While the handler is active, the exception's traceback
+                # pins every unwound frame's locals (pixel_values, encoder
+                # activations, decoder intermediates), so empty_cache inside
+                # the handler cannot reclaim the very memory that OOM'd.
+                oom = False
                 try:
                     result = self._segment_locked(record, scene_id, sensor, pts)
                 except torch.cuda.OutOfMemoryError:
-                    log.warning("CUDA OOM during segmentation; clearing caches, retrying once")
+                    oom = True
                     self._emb_cache.clear()
+                if oom:
+                    log.warning("CUDA OOM during segmentation; clearing caches, retrying once")
+                    gc.collect()  # break exception/traceback/frame cycles first
                     torch.cuda.empty_cache()
+                    oom_again: str | None = None
                     try:
                         result = self._segment_locked(record, scene_id, sensor, pts)
                     except torch.cuda.OutOfMemoryError as exc:
+                        oom_again = str(exc)
+                        # Drop the engine so the error state does not keep the
+                        # model's VRAM pinned while the hint asks the user to
+                        # free GPU memory; warmup reloads from scratch.
+                        self.model = None
+                        self.processor = None
+                        self._emb_cache.clear()
+                    if oom_again is not None:
+                        gc.collect()
+                        torch.cuda.empty_cache()
                         hint = (
                             "GPU out of memory even after a retry -- close other GPU-heavy "
                             "apps, then POST /api/segment/warmup to reload."
                         )
                         with self._state_lock:
                             self._state = "error"
-                            self.error = f"CUDA out of memory: {exc}"
+                            self.error = f"CUDA out of memory: {oom_again}"
                             self.hint = hint
                         return {"ok": False, "state": "error", "error": self.error, "hint": hint}
         except Exception as exc:  # noqa: BLE001 - contract: HTTP 200 with ok:false
@@ -432,9 +559,15 @@ class SegmentEngine:
         area_px = int(mask.sum())
         total_px = int(mask.size)
         coverage_pct = 100.0 * area_px / total_px if total_px else 0.0
-        # Ground resolution from the chip box: width on the ground = 2 * half_m.
-        m_per_px = 2.0 * gee.chip_half_size_m(record.length_m) / float(w)
-        area_m2 = float(area_px) * m_per_px * m_per_px
+        # Ground resolution from the chip box: BOTH axes span ~2*half_m on the
+        # ground, but EE renders thumbs in plate-carree (no crs param), so at
+        # BC latitudes the PNG is non-square (w > h) and the per-axis scales
+        # differ (~1/cos(lat)). Multiply per-axis scales: identical to the
+        # contract's (m_per_px)^2 when the thumb is square, correct when not.
+        half_m = gee.chip_half_size_m(record.length_m)
+        m_per_px_x = 2.0 * half_m / float(w)
+        m_per_px_y = 2.0 * half_m / float(h)
+        area_m2 = float(area_px) * m_per_px_x * m_per_px_y
 
         if area_px == 0:
             spawn = {
