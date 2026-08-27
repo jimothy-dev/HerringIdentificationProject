@@ -154,7 +154,8 @@ class LabelIn(BaseModel):
     sensor: str
     scene_date: str
     label: Literal["positive", "negative", "unsure", "unusable"]
-    notes: str = Field(default="")
+    # None (field absent) = keep any previously saved notes; "" = clear them.
+    notes: str | None = Field(default=None)
 
 
 def _queue_chip(record: SpawnRecord, body: LabelIn) -> None:
@@ -174,6 +175,29 @@ def _queue_chip(record: SpawnRecord, body: LabelIn) -> None:
     _chip_pool.submit(job)
 
 
+def _sync_chip_location(record_id: str, scene_id: str, chip_path: str, new_label: str) -> str:
+    """Move an existing chip into data/chips/{new_label}/ if it lives elsewhere.
+
+    Keeps the per-label chip layout truthful when a label is corrected, so a
+    later training set assembled from data/chips/{label}/ never picks up a
+    chip whose label has changed. Returns the (possibly new) chip path.
+    """
+    src = Path(chip_path)
+    if src.parent.name == new_label:
+        return chip_path
+    dest_dir = gee.CHIPS_DIR / new_label
+    dest = dest_dir / src.name
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        src.replace(dest)
+    except OSError as exc:
+        log.warning("could not move chip %s -> %s: %s", src, dest, exc)
+        return chip_path
+    label_store.set_chip_path(record_id, scene_id, str(dest))
+    log.info("chip moved for relabel: %s -> %s", src, dest)
+    return str(dest)
+
+
 @app.post("/api/labels")
 def api_save_label(body: LabelIn) -> dict:
     record = records_store.get(body.record_id)
@@ -183,6 +207,9 @@ def api_save_label(body: LabelIn) -> dict:
         raise HTTPException(status_code=422, detail=f"Invalid label: {body.label}")
 
     existing = label_store.get(body.record_id, body.scene_id)
+    notes = body.notes
+    if notes is None:  # field absent -> preserve saved notes (like chip_path)
+        notes = existing.get("notes", "") if existing else ""
     label_store.upsert(
         {
             "record_id": body.record_id,
@@ -190,7 +217,7 @@ def api_save_label(body: LabelIn) -> dict:
             "sensor": body.sensor,
             "scene_date": body.scene_date,
             "label": body.label,
-            "notes": body.notes,
+            "notes": notes,
             "region": record.region,
             "year": record.year,
             "location_name": record.location_name,
@@ -200,9 +227,14 @@ def api_save_label(body: LabelIn) -> dict:
         }
     )
 
+    # If a chip was already downloaded under a different label's folder, move it
+    # so data/chips/{label}/ always reflects the current label.
+    already = existing.get("chip_path") if existing else ""
+    if already and Path(already).exists():
+        already = _sync_chip_location(body.record_id, body.scene_id, already, body.label)
+
     chip = "skipped"
     if body.label in ("positive", "negative"):
-        already = existing.get("chip_path") if existing else ""
         if already and Path(already).exists():
             chip = "exists"
         elif gee.state().mock or not CFG.get("download_chips", True):
@@ -215,7 +247,16 @@ def api_save_label(body: LabelIn) -> dict:
 
 @app.delete("/api/labels")
 def api_delete_label(record_id: str = Query(...), scene_id: str = Query(...)) -> dict:
+    existing = label_store.get(record_id, scene_id)
     label_store.delete(record_id, scene_id)
+    # Remove the chip belonging to the deleted label row so no orphaned GeoTIFF
+    # lingers in a data/chips/{label}/ folder (labels.csv is the manifest).
+    chip_path = (existing or {}).get("chip_path") or ""
+    if chip_path:
+        try:
+            Path(chip_path).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not delete chip %s: %s", chip_path, exc)
     return {"ok": True}
 
 

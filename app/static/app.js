@@ -25,6 +25,8 @@ function h(tag, cls, ...children) {
 const state = {
   status: null,
   statusError: null,
+  nRecordsLabeled: null, // records with >=1 label (from /api/records?labeled=labeled)
+  notesByScene: {},      // scene_id -> saved notes for the selected record
   filters: { year: '', region: '', labeled: 'all' },
   page: 1,
   total: 0,
@@ -105,6 +107,14 @@ async function loadStatus() {
   try {
     state.status = await fetchJSON('/api/status');
     state.statusError = null;
+    // n_labeled counts label ROWS (scenes); record progress needs the count of
+    // records with >=1 label, which the labeled filter's total provides.
+    try {
+      const d = await fetchJSON('/api/records?labeled=labeled&page=1&page_size=1');
+      state.nRecordsLabeled = d.total || 0;
+    } catch (e) {
+      state.nRecordsLabeled = null;
+    }
   } catch (err) {
     state.status = null;
     state.statusError = String(err.message || err);
@@ -142,15 +152,23 @@ function renderStatus() {
     h('span', 'count pos', `${s.n_positive} positive`),
     h('span', 'count neg', `${s.n_negative} negative`)));
 
-  const pct = s.n_records ? Math.round((100 * s.n_labeled) / s.n_records) : 0;
+  const nRec = state.nRecordsLabeled;
+  let pct;
+  let text;
+  if (nRec != null) {
+    pct = s.n_records ? Math.min(100, Math.round((100 * nRec) / s.n_records)) : 0;
+    text = `${nRec} of ${s.n_records} records labeled (${pct}%) · ${s.n_labeled} labels`;
+  } else {
+    // Labeled-record count unavailable: show label rows only, clamp the bar.
+    pct = s.n_records ? Math.min(100, Math.round((100 * s.n_labeled) / s.n_records)) : 0;
+    text = `${s.n_labeled} labels saved · ${s.n_records} records`;
+  }
   progress.textContent = '';
   const bar = h('div', 'progress-bar');
   const fill = h('div', 'progress-fill');
   fill.style.width = pct + '%';
   bar.append(fill);
-  progress.append(
-    h('div', 'progress-text', `${s.n_labeled} of ${s.n_records} records labeled (${pct}%)`),
-    bar);
+  progress.append(h('div', 'progress-text', text), bar);
 }
 
 /* ---------------- filters + records ---------------- */
@@ -159,7 +177,9 @@ function loadFilters() {
   try {
     const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
     if (saved && typeof saved === 'object') {
-      if (saved.year != null) state.filters.year = String(saved.year);
+      // Only accept a numeric year: a garbage saved value would 422 the
+      // int-typed query param before the option list can correct it.
+      if (saved.year != null && /^\d+$/.test(String(saved.year))) state.filters.year = String(saved.year);
       if (saved.region != null) state.filters.region = String(saved.region);
       if (['all', 'unlabeled', 'labeled'].includes(saved.labeled)) state.filters.labeled = saved.labeled;
     }
@@ -193,12 +213,21 @@ function fillSelect(sel, values, current, allLabel) {
   }
   sel.value = current ? String(current) : '';
   if (sel.selectedIndex === -1) sel.value = '';
+  return sel.value; // effective value ('' if `current` was not an option)
 }
 
+/* Returns true if a stale saved filter had to be reset to '' (so the caller
+ * should re-query -- otherwise state.filters keeps filtering by a value the
+ * UI no longer shows). */
 function renderFilterOptions() {
-  fillSelect($('filter-year'), state.years, state.filters.year, 'All years');
-  fillSelect($('filter-region'), state.regions, state.filters.region, 'All regions');
+  let changed = false;
+  const year = fillSelect($('filter-year'), state.years, state.filters.year, 'All years');
+  if (year !== state.filters.year) { state.filters.year = year; changed = true; }
+  const region = fillSelect($('filter-region'), state.regions, state.filters.region, 'All regions');
+  if (region !== state.filters.region) { state.filters.region = region; changed = true; }
   $('filter-labeled').value = state.filters.labeled;
+  if (changed) saveFilters();
+  return changed;
 }
 
 function maxPage() {
@@ -222,7 +251,14 @@ async function loadRecords() {
     state.page = data.page || 1;
     state.years = data.years || [];
     state.regions = data.regions || [];
-    renderFilterOptions();
+    const corrected = renderFilterOptions();
+    if (corrected) {
+      // A stale saved filter was reset; re-query once with the fixed filters
+      // (the reset values are always valid, so this cannot loop).
+      state.page = 1;
+      await loadRecords();
+      return;
+    }
     renderRecordList();
     renderPagination();
   } catch (err) {
@@ -323,6 +359,43 @@ async function nextRecord() {
   const idx = state.selected ? state.records.findIndex((r) => r.id === state.selected.id) : -1;
   if (idx === -1) { selectRecord(state.records[0]); return; }
   if (idx < state.records.length - 1) { selectRecord(state.records[idx + 1]); return; }
+
+  // Last record of the page. With the 'unlabeled' filter, records the user
+  // just labeled have dropped OUT of the server-side set, shifting later
+  // records up -- naive page+1 arithmetic would silently skip a page's worth
+  // of records. Re-anchor by record id on a fresh view of the same page.
+  if (state.filters.labeled === 'unlabeled') {
+    const leftId = state.selected.id;
+    const prevIds = new Set(state.records.map((r) => r.id));
+    await loadRecords();
+    if (!state.records.length && state.page > 1) {
+      // The set shrank below this page; clamp and reload.
+      state.page = Math.min(state.page, maxPage());
+      await loadRecords();
+    }
+    const i = state.records.findIndex((r) => r.id === leftId);
+    if (i !== -1) {
+      // Current record is still unlabeled and on this page.
+      if (i < state.records.length - 1) { selectRecord(state.records[i + 1]); return; }
+      if (state.page < maxPage()) {
+        state.page += 1;
+        await loadRecords();
+        if (state.records.length) { selectRecord(state.records[0]); return; }
+      }
+      toast('End of record list.');
+      return;
+    }
+    // Current record dropped out (it got labeled). Any record now on the page
+    // that was NOT here before must have shifted in from later in the list.
+    const shiftedIn = state.records.find((r) => !prevIds.has(r.id));
+    if (shiftedIn) { selectRecord(shiftedIn); return; }
+    // End of the set: fall back to any still-unlabeled leftover on this page.
+    const leftover = state.records.find((r) => r.id !== leftId);
+    if (leftover) { selectRecord(leftover); return; }
+    toast('End of record list.');
+    return;
+  }
+
   if (state.page < maxPage()) {
     state.page += 1;
     await loadRecords();
@@ -337,6 +410,40 @@ async function prevRecord() {
   const idx = state.selected ? state.records.findIndex((r) => r.id === state.selected.id) : -1;
   if (idx === -1) { selectRecord(state.records[0]); return; }
   if (idx > 0) { selectRecord(state.records[idx - 1]); return; }
+
+  // Mirror of nextRecord(): with the 'unlabeled' filter the set may have
+  // shifted, so re-anchor by record id instead of trusting page arithmetic.
+  if (state.filters.labeled === 'unlabeled') {
+    const leftId = state.selected.id;
+    await loadRecords();
+    if (!state.records.length && state.page > 1) {
+      state.page = Math.min(state.page, maxPage());
+      await loadRecords();
+    }
+    let i = state.records.findIndex((r) => r.id === leftId);
+    if (i > 0) { selectRecord(state.records[i - 1]); return; }
+    if (i === -1 && state.page > 1) {
+      // The current record shifted up onto an earlier page (or dropped out).
+      state.page -= 1;
+      await loadRecords();
+      i = state.records.findIndex((r) => r.id === leftId);
+      if (i > 0) { selectRecord(state.records[i - 1]); return; }
+      if (i === -1 && state.records.length) {
+        selectRecord(state.records[state.records.length - 1]);
+        return;
+      }
+    } else if (i === 0 && state.page > 1) {
+      state.page -= 1;
+      await loadRecords();
+      if (state.records.length) {
+        selectRecord(state.records[state.records.length - 1]);
+        return;
+      }
+    }
+    toast('Start of record list.');
+    return;
+  }
+
   if (state.page > 1) {
     state.page -= 1;
     await loadRecords();
@@ -364,6 +471,10 @@ function renderModeButtons() {
   $('mode-offseason').classList.toggle('active', state.mode === 'offseason');
 }
 
+function notesForScene(s) {
+  return (s && state.notesByScene[s.scene_id]) || '';
+}
+
 async function loadScenes() {
   const rec = state.selected;
   if (!rec) return;
@@ -374,14 +485,24 @@ async function loadScenes() {
   state.scenesLoading = true;
   state.sceneIdx = 0;
   state.falseColor = false;
+  state.notesByScene = {};
+  // Never carry a draft note across scene lists (mode toggle / retry) -- it
+  // would get saved onto an unrelated scene.
+  $('notes-input').value = '';
   renderScenesArea();
   try {
-    const data = await fetchJSON(
-      `/api/records/${encodeURIComponent(rec.id)}/scenes?mode=${state.mode}`);
+    const [data, labelData] = await Promise.all([
+      fetchJSON(`/api/records/${encodeURIComponent(rec.id)}/scenes?mode=${state.mode}`),
+      fetchJSON(`/api/labels?record_id=${encodeURIComponent(rec.id)}`).catch(() => null),
+    ]);
     if (token !== state.scenesToken) return;
     state.scenes = data.scenes || [];
     state.window = data.window || null;
     state.scenesError = data.error || null;
+    if (labelData && Array.isArray(labelData.labels)) {
+      for (const row of labelData.labels) state.notesByScene[row.scene_id] = row.notes || '';
+    }
+    $('notes-input').value = notesForScene(currentScene());
     preloadThumbs(state.scenes);
   } catch (err) {
     if (token !== state.scenesToken) return;
@@ -489,7 +610,9 @@ function selectScene(i) {
   if (i < 0 || i >= state.scenes.length) return;
   if (i === state.sceneIdx) { renderViewer(); return; }
   state.sceneIdx = i;
-  $('notes-input').value = '';
+  // Show the notes already saved for this scene (if any) so a relabel edits
+  // rather than silently discards them.
+  $('notes-input').value = notesForScene(state.scenes[i]);
   renderFilmstrip();
   renderViewer();
 }
@@ -563,6 +686,7 @@ async function setLabel(value) {
 
   const prev = scene.label;
   const notes = $('notes-input').value.trim();
+  const prevNotes = notesForScene(scene);
 
   // optimistic update, then advance immediately
   scene.label = value;
@@ -578,7 +702,12 @@ async function setLabel(value) {
     scene_date: scene.date,
     label: value,
   };
-  if (notes) body.notes = notes;
+  // Send notes when non-empty, or when the user cleared a previously saved
+  // note (explicit '' overwrites; an absent field preserves server-side).
+  if (notes || notes !== prevNotes) {
+    body.notes = notes;
+    state.notesByScene[scene.scene_id] = notes;
+  }
 
   try {
     await fetchJSON('/api/labels', {
@@ -590,6 +719,8 @@ async function setLabel(value) {
   } catch (err) {
     // rollback
     scene.label = prev;
+    if (prevNotes) state.notesByScene[scene.scene_id] = prevNotes;
+    else delete state.notesByScene[scene.scene_id];
     adjustLabelCount(rec.id, value, prev);
     if (state.selected && state.selected.id === rec.id && state.scenes.includes(scene)) {
       renderFilmstrip();
@@ -605,7 +736,10 @@ async function clearLabel() {
   if (!rec || !scene || scene.label == null) return;
 
   const prev = scene.label;
+  const prevNotes = notesForScene(scene);
   scene.label = null;
+  delete state.notesByScene[scene.scene_id];
+  if (currentScene() === scene) $('notes-input').value = '';
   adjustLabelCount(rec.id, prev, null);
   renderFilmstrip();
   renderViewer();
@@ -617,6 +751,10 @@ async function clearLabel() {
     loadStatus();
   } catch (err) {
     scene.label = prev;
+    if (prevNotes) {
+      state.notesByScene[scene.scene_id] = prevNotes;
+      if (currentScene() === scene) $('notes-input').value = prevNotes;
+    }
     adjustLabelCount(rec.id, null, prev);
     if (state.selected && state.selected.id === rec.id && state.scenes.includes(scene)) {
       renderFilmstrip();

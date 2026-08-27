@@ -98,14 +98,29 @@ class LabelStore:
                 clean["chip_path"] = existing.get("chip_path", "")
             clean["labeled_at_utc"] = _utc_now_iso()
             self._rows[key] = clean
-            self._write_locked()
+            try:
+                self._write_locked()
+            except BaseException:
+                # Keep memory consistent with disk if the write fails (e.g. the
+                # CSV is open in Excel and os.replace raises PermissionError).
+                if existing is None:
+                    self._rows.pop(key, None)
+                else:
+                    self._rows[key] = existing
+                raise
         return dict(clean)
 
     def delete(self, record_id: str, scene_id: str) -> bool:
+        key = (record_id, scene_id)
         with self._lock:
-            removed = self._rows.pop((record_id, scene_id), None) is not None
+            prior = self._rows.pop(key, None)
+            removed = prior is not None
             if removed:
-                self._write_locked()
+                try:
+                    self._write_locked()
+                except BaseException:
+                    self._rows[key] = prior
+                    raise
         return removed
 
     def set_chip_path(self, record_id: str, scene_id: str, chip_path: str) -> None:
@@ -113,8 +128,13 @@ class LabelStore:
             row = self._rows.get((record_id, scene_id))
             if row is None:
                 return
+            prior = row.get("chip_path", "")
             row["chip_path"] = chip_path
-            self._write_locked()
+            try:
+                self._write_locked()
+            except BaseException:
+                row["chip_path"] = prior
+                raise
 
     # ----------------------------------------------------------- internal
 

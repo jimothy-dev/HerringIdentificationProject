@@ -84,8 +84,18 @@ def get_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-        except (OSError, json.JSONDecodeError) as exc:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                cfg.update(loaded)
+            else:
+                log.warning(
+                    "config.json is not a JSON object (got %s); using defaults",
+                    type(loaded).__name__,
+                )
+        # ValueError covers both JSONDecodeError and UnicodeDecodeError (e.g. a
+        # UTF-16 file written by PowerShell redirection) -- the app must always
+        # come up, worst case with defaults.
+        except (OSError, ValueError) as exc:
             log.warning("config.json unreadable (%s); using defaults", exc)
     else:
         try:
