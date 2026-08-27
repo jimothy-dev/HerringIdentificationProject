@@ -486,6 +486,7 @@ async function loadScenes() {
   state.sceneIdx = 0;
   state.falseColor = false;
   state.notesByScene = {};
+  clearSegForScene(); // record/mode switch invalidates segment points+mask
   // Never carry a draft note across scene lists (mode toggle / retry) -- it
   // would get saved onto an unrelated scene.
   $('notes-input').value = '';
@@ -610,6 +611,7 @@ function selectScene(i) {
   if (i < 0 || i >= state.scenes.length) return;
   if (i === state.sceneIdx) { renderViewer(); return; }
   state.sceneIdx = i;
+  clearSegForScene(); // segment points/mask belong to one scene only
   // Show the notes already saved for this scene (if any) so a relabel edits
   // rather than silently discards them.
   $('notes-input').value = notesForScene(state.scenes[i]);
@@ -633,6 +635,14 @@ function renderViewer() {
     'False color ', h('kbd', null, 'F'));
   fBtn.type = 'button';
   fBtn.addEventListener('click', toggleFalseColor);
+  const sBtn = h('button', 'btn toggle seg-btn' + (seg.active ? ' active' : ''),
+    'Segment ', h('kbd', null, 'S'));
+  sBtn.type = 'button';
+  sBtn.title = 'Segment mode: click a feature, SAM outlines it and scores spawn likelihood';
+  sBtn.addEventListener('click', toggleSegMode);
+  const sBadge = h('span', 'seg-badge');
+  sBadge.id = 'seg-badge';
+  sBadge.hidden = true;
   meta.append(...[
     h('span', 'vm-date', s.date),
     h('span', 'vm-sensor', SENSOR_NAMES[s.sensor] || s.sensor),
@@ -640,6 +650,8 @@ function renderViewer() {
     cloudPill(s.cloud_region_pct),
     h('span', 'vm-spacer'),
     fBtn,
+    sBtn,
+    sBadge,
     h('span', 'vm-counter', `${state.sceneIdx + 1} / ${state.scenes.length}`),
   ].filter(Boolean));
 
@@ -656,6 +668,7 @@ function renderViewer() {
   });
   $('scene-prev').disabled = state.sceneIdx <= 0;
   $('scene-next').disabled = state.sceneIdx >= state.scenes.length - 1;
+  syncSegDom();
 }
 
 /* ---------------- labeling ---------------- */
@@ -765,6 +778,396 @@ async function clearLabel() {
   }
 }
 
+/* ---------------- segment mode ---------------- */
+/*
+ * Frozen contract (backend built separately):
+ *   GET  /api/segment/status  -> {state, backend, device, classifier, error, hint}
+ *   POST /api/segment/warmup  -> {ok, state}  (idempotent, returns immediately)
+ *   POST /api/segment {record_id, scene_id, sensor, points:[{x,y,label}]}
+ *        -> always HTTP 200; ok:false carries {state, error?, hint?};
+ *           ok:true carries mask_png (same WxH as the true-color thumb), area/score/etc.
+ * Click coords are normalized 0-1 in TRUE-COLOR thumb image space.
+ */
+
+const seg = {
+  active: false,
+  status: null,        // last /api/segment/status payload (or synthesized error)
+  statusTimer: null,   // status polling interval id
+  points: [],          // accumulated clicks {x,y,label} for the CURRENT scene
+  result: null,        // last successful /api/segment response for this scene
+  inFlight: false,     // a /api/segment request is running
+  pending: false,      // click(s) arrived while in flight; resend once with ALL points
+  reqToken: 0,         // bumped on clear/scene-switch to invalidate stale responses
+  retryTimer: null,
+  retryCount: 0,
+  retrying: false,     // model-still-loading auto-retry in progress
+  lastError: null,     // {error, hint} from the last failed segment call
+  sceneEncoded: false, // scene has returned a mask (first click encodes, ~5-30s)
+};
+
+function segWarmup() {
+  // Fire-and-forget: the status poll surfaces any problem.
+  fetchJSON('/api/segment/warmup', { method: 'POST' }).catch(() => {});
+}
+
+function startSegPolling() {
+  pollSegStatus();
+  if (seg.statusTimer == null) seg.statusTimer = setInterval(pollSegStatus, 3000);
+}
+
+function stopSegPolling() {
+  if (seg.statusTimer != null) {
+    clearInterval(seg.statusTimer);
+    seg.statusTimer = null;
+  }
+}
+
+async function pollSegStatus() {
+  let s;
+  try {
+    s = await fetchJSON('/api/segment/status');
+  } catch (err) {
+    s = {
+      state: 'error', backend: null, device: null, classifier: null,
+      error: String(err.message || err),
+      hint: 'Segment endpoint unreachable — is the backend running with segment support?',
+    };
+  }
+  seg.status = s;
+  updateSegBadge();
+  renderSegPanel();
+  if (s.state === 'ready' || s.state === 'error') stopSegPolling();
+}
+
+function toggleSegMode() {
+  seg.active = !seg.active;
+  if (seg.active) {
+    segWarmup();
+    startSegPolling();
+  } else {
+    stopSegPolling();
+  }
+  const btn = document.querySelector('.seg-btn');
+  if (btn) btn.classList.toggle('active', seg.active);
+  syncSegDom();
+}
+
+/* Reflect segment state into the DOM (cursor, overlay, panel, badge). */
+function syncSegDom() {
+  const wrap = $('viewer-img-wrap');
+  wrap.classList.toggle('seg-active', seg.active);
+  const show = seg.active && !!currentScene();
+  $('seg-overlay').hidden = !show;
+  $('seg-panel').hidden = !show;
+  updateSegBadge();
+  if (show) {
+    renderSegMask();
+    renderSegMarkers();
+    positionSegOverlay();
+    renderSegPanel();
+  }
+}
+
+function updateSegBadge() {
+  const b = $('seg-badge');
+  if (!b) return; // viewer meta not rendered yet
+  if (!seg.active) { b.hidden = true; return; }
+  b.hidden = false;
+  const s = seg.status;
+  const st = s ? s.state : 'loading';
+  b.className = 'seg-badge '
+    + (st === 'ready' ? 'ready' : st === 'error' ? 'error' : 'loading');
+  if (st === 'ready') {
+    b.textContent = (s.backend || 'sam').toUpperCase() + ' · ' + (s.device || '?');
+    b.title = 'Segmentation ready · classifier: ' + (s.classifier || 'heuristic');
+  } else if (st === 'error') {
+    b.textContent = 'SAM error';
+    b.title = (s && s.error) || 'unknown error';
+  } else {
+    b.textContent = 'loading SAM…';
+    b.title = 'Model is ' + st + ' — first load can take a while';
+  }
+}
+
+/* Displayed content rect of #viewer-img (object-fit: contain math). */
+function positionSegOverlay() {
+  const overlay = $('seg-overlay');
+  if (overlay.hidden) return;
+  const wrap = $('viewer-img-wrap');
+  const img = $('viewer-img');
+  const natW = img.naturalWidth;
+  const natH = img.naturalHeight;
+  if (!img.complete || !natW || !natH) {
+    overlay.style.width = '0px';
+    overlay.style.height = '0px';
+    return;
+  }
+  const ir = img.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const scale = Math.min(ir.width / natW, ir.height / natH);
+  const cw = natW * scale;
+  const ch = natH * scale;
+  overlay.style.left = (ir.left - wr.left - wrap.clientLeft + (ir.width - cw) / 2) + 'px';
+  overlay.style.top = (ir.top - wr.top - wrap.clientTop + (ir.height - ch) / 2) + 'px';
+  overlay.style.width = cw + 'px';
+  overlay.style.height = ch + 'px';
+}
+
+function renderSegMask() {
+  const m = $('seg-mask');
+  if (seg.result && seg.result.mask_png) {
+    if (m.getAttribute('src') !== seg.result.mask_png) m.src = seg.result.mask_png;
+    m.hidden = false;
+  } else {
+    m.removeAttribute('src');
+    m.hidden = true;
+  }
+}
+
+function renderSegMarkers() {
+  const box = $('seg-points');
+  box.textContent = '';
+  for (const p of seg.points) {
+    const d = h('div', 'seg-pt ' + (p.label === 0 ? 'bg' : 'fg'));
+    d.style.left = (p.x * 100) + '%';
+    d.style.top = (p.y * 100) + '%';
+    box.append(d);
+  }
+}
+
+function onViewerClick(e) {
+  if (!seg.active || state.scenesLoading) return;
+  const scene = currentScene();
+  if (!scene) return;
+  const img = $('viewer-img');
+  const natW = img.naturalWidth;
+  const natH = img.naturalHeight;
+  if (!img.complete || !natW || !natH) return;
+  const ir = img.getBoundingClientRect();
+  if (!ir.width || !ir.height) return;
+  const scale = Math.min(ir.width / natW, ir.height / natH);
+  const cw = natW * scale;
+  const ch = natH * scale;
+  const x = (e.clientX - ir.left - (ir.width - cw) / 2) / cw;
+  const y = (e.clientY - ir.top - (ir.height - ch) / 2) / ch;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return; // letterbox / background click
+  e.preventDefault();
+  seg.points.push({ x, y, label: e.shiftKey ? 0 : 1 });
+  renderSegMarkers();
+  positionSegOverlay();
+  sendSegment();
+}
+
+/* A fresh click cancels any loading-retry loop and sends immediately
+ * (or queues one resend if a request is already in flight). */
+function sendSegment() {
+  if (seg.retryTimer) { clearTimeout(seg.retryTimer); seg.retryTimer = null; }
+  seg.retryCount = 0;
+  seg.retrying = false;
+  if (seg.inFlight) {
+    seg.pending = true; // coalesces: the resend carries ALL accumulated points
+    renderSegPanel();
+    return;
+  }
+  doSegmentRequest();
+}
+
+async function doSegmentRequest() {
+  const rec = state.selected;
+  const scene = currentScene();
+  if (!rec || !scene || !seg.points.length) return;
+  const token = seg.reqToken;
+  const body = {
+    record_id: rec.id,
+    scene_id: scene.scene_id,
+    sensor: scene.sensor,
+    points: seg.points.map((p) => ({ x: p.x, y: p.y, label: p.label })),
+  };
+  seg.inFlight = true;
+  seg.lastError = null;
+  renderSegPanel();
+
+  let data;
+  try {
+    data = await fetchJSON('/api/segment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    data = { ok: false, state: 'error', error: String(err.message || err) };
+  }
+  seg.inFlight = false;
+
+  if (token !== seg.reqToken) {
+    // Scene switched / cleared while in flight: drop this response, but honor
+    // a click queued for the NEW context.
+    if (seg.pending) {
+      seg.pending = false;
+      if (seg.points.length) doSegmentRequest();
+    }
+    return;
+  }
+
+  if (data.ok) {
+    seg.result = data;
+    seg.sceneEncoded = true;
+    seg.retrying = false;
+    seg.retryCount = 0;
+    seg.lastError = null;
+    // A success proves the model is up even if the poll has not caught up.
+    if (!seg.status || seg.status.state !== 'ready') {
+      seg.status = {
+        state: 'ready', backend: data.backend || null, device: data.device || null,
+        classifier: data.spawn_score && data.spawn_score.kind === 'model' ? 'trained' : 'heuristic',
+        error: null, hint: null,
+      };
+      stopSegPolling();
+      updateSegBadge();
+    }
+    renderSegMask();
+    positionSegOverlay();
+    renderSegPanel();
+  } else if (data.state === 'loading' || data.state === 'cold') {
+    if (data.state === 'cold') segWarmup();
+    startSegPolling(); // keep the badge live while we wait
+    if (seg.retryCount < 5) {
+      seg.retryCount += 1;
+      seg.retrying = true;
+      seg.pending = false; // the retry resends ALL accumulated points anyway
+      renderSegPanel();
+      seg.retryTimer = setTimeout(() => {
+        seg.retryTimer = null;
+        if (token === seg.reqToken && seg.points.length && !seg.inFlight) {
+          doSegmentRequest();
+        }
+      }, 3000);
+      return;
+    }
+    seg.retrying = false;
+    seg.lastError = {
+      error: 'Model is still loading — give it a moment, then click again.',
+      hint: data.hint || null,
+    };
+    renderSegPanel();
+  } else {
+    seg.retrying = false;
+    seg.lastError = {
+      error: data.error || 'Segmentation failed.',
+      hint: data.hint || null,
+    };
+    renderSegPanel();
+  }
+
+  if (seg.pending) {
+    seg.pending = false;
+    if (seg.points.length && !seg.inFlight) doSegmentRequest();
+  }
+}
+
+/* Clears points + mask for the current scene (Esc / Clear / scene switch). */
+function clearSegForScene() {
+  seg.points = [];
+  seg.result = null;
+  seg.pending = false;
+  seg.sceneEncoded = false;
+  seg.retrying = false;
+  seg.lastError = null;
+  seg.reqToken += 1;
+  if (seg.retryTimer) { clearTimeout(seg.retryTimer); seg.retryTimer = null; }
+  seg.retryCount = 0;
+  renderSegMask();
+  renderSegMarkers();
+  renderSegPanel();
+}
+
+function segClearBtn() {
+  const b = h('button', 'btn ghost seg-clear', 'Clear ', h('kbd', null, 'Esc'));
+  b.type = 'button';
+  b.addEventListener('click', clearSegForScene);
+  return b;
+}
+
+function fmtArea(m2, px) {
+  if (m2 == null) return fmtNum(px) + ' px';
+  if (m2 >= 1e6) {
+    const km2 = m2 / 1e6;
+    return (km2 >= 10 ? km2.toFixed(1) : km2.toFixed(2)) + ' km²';
+  }
+  return fmtNum(m2) + ' m²';
+}
+
+function renderSegPanel() {
+  const panel = $('seg-panel');
+  panel.textContent = '';
+  if (!seg.active) return;
+
+  const st = seg.status;
+  if (st && st.state === 'error') {
+    panel.append(h('div', 'seg-err',
+      'Segmentation backend error: ' + (st.error || 'unknown')));
+    if (st.hint) panel.append(h('div', 'seg-hint', st.hint));
+    return;
+  }
+
+  if (seg.inFlight || seg.pending) {
+    panel.append(h('div', 'seg-msg', h('div', 'spinner sm'), 'Segmenting…'));
+    if (!seg.sceneEncoded) {
+      panel.append(h('div', 'seg-hint-first',
+        'First click on a new scene encodes it (~5–30 s).'));
+    }
+    return;
+  }
+
+  if (seg.retrying) {
+    panel.append(h('div', 'seg-msg', h('div', 'spinner sm'),
+      'Model still loading — retrying…'));
+    return;
+  }
+
+  if (seg.lastError) {
+    panel.append(h('div', 'seg-err', seg.lastError.error));
+    if (seg.lastError.hint) panel.append(h('div', 'seg-hint', seg.lastError.hint));
+    panel.append(segClearBtn());
+    return;
+  }
+
+  const r = seg.result;
+  if (!r) {
+    panel.append(h('div', 'seg-hint',
+      'Click a feature in the image to segment it · Shift+click adds a background (exclude) point · Esc clears.'));
+    if (!seg.sceneEncoded) {
+      panel.append(h('div', 'seg-hint-first',
+        'First click on a new scene encodes it (~5–30 s).'));
+    }
+    return;
+  }
+
+  const score = r.spawn_score || {};
+  const prob = Math.max(0, Math.min(1, Number(score.prob) || 0));
+  const pct = Math.round(prob * 100);
+  const bar = h('div', 'seg-score-bar');
+  const fill = h('div', 'seg-score-fill');
+  fill.style.width = pct + '%';
+  bar.append(fill);
+  const scoreWrap = h('div', 'seg-score-wrap',
+    h('div', 'seg-score-top',
+      h('span', 'seg-score-label', 'Spawn score'),
+      score.kind ? h('span', 'seg-kind-pill', score.kind) : null,
+      h('span', 'seg-score-val', pct + '%')),
+    bar,
+    score.note ? h('div', 'seg-note', score.note) : null);
+
+  const stats = h('div', 'seg-stats',
+    fact('Area', fmtArea(r.area_m2, r.area_px)),
+    fact('Coverage', r.coverage_pct != null ? r.coverage_pct.toFixed(2) + '%' : '—'),
+    fact('SAM IoU', r.sam_iou != null ? Number(r.sam_iou).toFixed(2) : '—'),
+    fact('Time', fmtNum(r.timing_ms) + ' ms'),
+    fact('Model', (r.backend || '?').toUpperCase() + ' · ' + (r.device || '?')));
+
+  panel.append(h('div', 'seg-row', scoreWrap, stats, segClearBtn()));
+}
+
 /* ---------------- keyboard ---------------- */
 
 function onKeydown(e) {
@@ -785,6 +1188,10 @@ function onKeydown(e) {
     case 'c': clearLabel(); break;
     case 'f': toggleFalseColor(); break;
     case 'm': toggleMode(); break;
+    case 's': toggleSegMode(); break;
+    case 'escape':
+      if (seg.active && (seg.points.length || seg.result)) clearSegForScene();
+      break;
     case 'j': nextRecord(); break;
     case 'k': prevRecord(); break;
     case 'arrowleft':
@@ -818,7 +1225,16 @@ function wireEvents() {
   $('btn-clear').addEventListener('click', clearLabel);
   const vImg = $('viewer-img');
   vImg.addEventListener('error', () => $('viewer-img-wrap').classList.add('img-broken'));
-  vImg.addEventListener('load', () => $('viewer-img-wrap').classList.remove('img-broken'));
+  vImg.addEventListener('load', () => {
+    $('viewer-img-wrap').classList.remove('img-broken');
+    positionSegOverlay(); // new natural size => recompute the contain rect
+  });
+  const vWrap = $('viewer-img-wrap');
+  vWrap.addEventListener('click', onViewerClick);
+  window.addEventListener('resize', positionSegOverlay);
+  if (window.ResizeObserver) {
+    new ResizeObserver(positionSegOverlay).observe(vWrap);
+  }
   document.addEventListener('keydown', onKeydown);
 }
 

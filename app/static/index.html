@@ -51,6 +51,7 @@
         <span><kbd>J</kbd><kbd>K</kbd> records</span>
         <span><kbd>F</kbd> false color</span>
         <span><kbd>M</kbd> mode</span>
+        <span><kbd>S</kbd> segment</span>
       </footer>
     </aside>
 
@@ -84,7 +85,13 @@
 
         <div id="viewer" hidden>
           <div id="viewer-meta"></div>
-          <div id="viewer-img-wrap"><img id="viewer-img" alt="Selected satellite scene"></div>
+          <div id="viewer-img-wrap">
+            <img id="viewer-img" alt="Selected satellite scene">
+            <div id="seg-overlay" hidden>
+              <img id="seg-mask" alt="" hidden>
+              <div id="seg-points"></div>
+            </div>
+          </div>
           <div id="label-bar">
             <button id="scene-prev" class="btn nav" type="button" title="Previous scene (&#8592;)">&#9664;</button>
             <div id="label-btns">
@@ -97,6 +104,7 @@
             <input id="notes-input" type="text" placeholder="notes (optional)" autocomplete="off" spellcheck="false">
             <button id="scene-next" class="btn nav" type="button" title="Next scene (&#8594;)">&#9654;</button>
           </div>
+          <div id="seg-panel" hidden></div>
         </div>
       </section>
     </main>
