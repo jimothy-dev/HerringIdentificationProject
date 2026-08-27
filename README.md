@@ -85,6 +85,7 @@ clear `data/labels.csv` before starting real labeling.
 data/
   Pacific_herring_spawn_index_data_2025_EN.csv   # source spawn records (DFO)
   labels.csv                                     # your labels (the training dataset)
+  scene_availability.json                        # per-record usable-scene cache (see "Scene availability")
   chips/                                         # downloaded GeoTIFF chips, one folder per label
     positive/
     negative/
@@ -123,6 +124,39 @@ data/
 Labeling auto-advances to the next scene, and after the last scene, to the next record.
 The **Off-season** mode queries Aug 1 - Sep 15 of the same year (herring do not spawn then), which is a
 fast way to harvest guaranteed-negative examples of the same coastline.
+
+## Scene availability (hide empty + scan)
+
+With the `max_cloud_pct` ceiling (70 by default), many records — cloudy BC March windows especially —
+have **zero usable scenes**. The sidebar handles this two ways:
+
+- **Hide empty** (checkbox in the filters row, default ON) hides records known to have no usable scenes
+  at the current ceiling, with a small "N hidden" note. Records you have already labeled are **never**
+  hidden. Whether a record is empty is only knowable via an Earth Engine query, so it comes from a
+  per-record cache (`data/scene_availability.json`) that fills in two ways: organically whenever you open
+  a record, and in bulk via **Scan for scenes**.
+- **Scan for scenes** starts a background sweep over the records matching the current year/region filter
+  that have not been checked yet (metadata only — a few seconds per record). Progress shows next to the
+  button ("scanning 34/217…") and the record list updates as empties are found. The cache survives
+  restarts; re-scanning only queries records still unknown at the current ceiling.
+
+When a record you open has scenes but the cloud ceiling dropped all of them, the viewer says
+**"All scenes too cloudy"** with a **Show cloudy scenes** button — that re-fetches with the ceiling off
+(`max_cloud=100`) so you can still inspect and label the cloudy scenes. The override lasts until you
+switch record or mode, and never touches the availability cache.
+
+API (used by the UI, handy for scripting):
+
+- `POST /api/availability/sweep` body `{"year": int|null, "region": str|null}` →
+  `{"ok": true, "state": "started"|"already_running", "total": n}` — starts the background sweep over
+  matching still-unknown records (a second call while one runs reports the remaining count).
+- `GET /api/availability/status` →
+  `{"running", "done", "total", "empty_found", "checked_total", "unknown_total"}` — sweep progress plus
+  whole-record-set coverage.
+- `GET /api/records?hide_empty=0|1` (default 1) — each record carries
+  `scene_status: "ok"|"empty"|"unknown"`, and the response's `n_hidden_empty` counts records hidden.
+- `GET /api/records/{id}/scenes?max_cloud=0..100` — per-request cloud-ceiling override; the response's
+  `n_cloud_filtered` and `max_cloud_pct` report how many scenes the applied ceiling dropped.
 
 ## Segment mode (SAM)
 

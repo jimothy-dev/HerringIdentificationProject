@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import gee, segment
+from app import availability, gee, segment
 from app.labels import VALID_LABELS, LabelStore
 from app.records import RecordStore, SpawnRecord
 
@@ -33,10 +33,13 @@ log = logging.getLogger("herring.main")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "app" / "static"
 
-# Module-level singletons (config, data, labels, EE state, chip worker pool).
+# Module-level singletons (config, data, labels, availability, EE state,
+# chip worker pool).
 CFG = gee.get_config()
 records_store = RecordStore()
 label_store = LabelStore()
+availability_store = availability.AvailabilityStore()
+sweep_runner = availability.SweepRunner(availability_store)
 gee.init_ee()
 _chip_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chip")
 
@@ -70,23 +73,46 @@ def api_records(
     labeled: Literal["all", "unlabeled", "labeled"] = Query(default="all"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
+    hide_empty: int = Query(default=1, ge=0, le=1),
 ) -> dict:
     counts_by_record = label_store.record_label_counts()
-    total, page_rows = records_store.query(
+    ceiling = gee.effective_max_cloud()
+    avail = availability_store.snapshot()
+    # Cached mock-mode (fabricated) counts only count while still in mock mode.
+    mock_ok = gee.state().mock
+
+    def scene_status(rid: str) -> str:
+        return availability_store.status_of(avail.get(rid), ceiling, mock_ok)
+
+    exclude_fn = None
+    if hide_empty:
+        # Hide records with no usable scenes at the current ceiling -- but
+        # NEVER a record the user has labeled.
+        def exclude_fn(rec: SpawnRecord, n_labels: int) -> bool:
+            return n_labels == 0 and scene_status(rec.id) == "empty"
+
+    total, n_hidden_empty, page_rows = records_store.query(
         year=year,
         region=region,
         labeled=labeled,
         page=page,
         page_size=page_size,
         n_labels_fn=lambda rid: counts_by_record.get(rid, 0),
+        exclude_fn=exclude_fn,
     )
+    records_out = []
+    for rec, n in page_rows:
+        row = rec.to_api(n)
+        row["scene_status"] = scene_status(rec.id)
+        records_out.append(row)
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
         "years": records_store.years,
         "regions": records_store.regions,
-        "records": [rec.to_api(n) for rec, n in page_rows],
+        "n_hidden_empty": n_hidden_empty,
+        "records": records_out,
     }
 
 
@@ -108,6 +134,7 @@ def _scene_window(record: SpawnRecord, mode: str) -> tuple[dt.date, dt.date]:
 def api_scenes(
     record_id: str,
     mode: Literal["spawn", "offseason"] = Query(default="spawn"),
+    max_cloud: float | None = Query(default=None, ge=0, le=100),
 ) -> dict:
     record = records_store.get(record_id)
     if record is None:
@@ -119,20 +146,37 @@ def api_scenes(
         "mode": mode,
         "window": {"start": window_start.isoformat(), "end": window_end.isoformat()},
         "scenes": [],
+        "n_cloud_filtered": 0,
+        "max_cloud_pct": gee.effective_max_cloud(max_cloud),
         "error": None,
     }
 
     st = gee.state()
     if st.mock:
-        scenes = gee.mock_scenes(record_id, mode, window_start, window_end)
+        scenes, n_cloud_filtered = gee.mock_scenes(
+            record_id, mode, window_start, window_end, max_cloud_override=max_cloud
+        )
     else:
         try:
-            scenes = gee.search_scenes(
-                record.lon, record.lat, record.length_m, window_start, window_end
+            scenes, n_cloud_filtered = gee.search_scenes(
+                record.lon,
+                record.lat,
+                record.length_m,
+                window_start,
+                window_end,
+                max_cloud_override=max_cloud,
             )
         except gee.GeeError as exc:
             response["error"] = str(exc)
             return response
+
+    # Organic availability update: only a spawn-mode search at the config
+    # ceiling describes availability (override requests must not touch it).
+    # Mock-mode results are tagged so they are re-checked once EE is live.
+    if mode == "spawn" and max_cloud is None:
+        availability_store.set(
+            record_id, len(scenes), gee.effective_max_cloud(), mock=st.mock
+        )
 
     for sc in scenes:
         if mode == "spawn":
@@ -143,7 +187,64 @@ def api_scenes(
         sc["label"] = label_store.label_for(record_id, sc["scene_id"])
 
     response["scenes"] = scenes
+    response["n_cloud_filtered"] = n_cloud_filtered
     return response
+
+
+# -------------------------------------------------------------- availability
+
+class SweepIn(BaseModel):
+    year: int | None = None
+    region: str | None = None
+
+
+def _sweep_check(record: SpawnRecord) -> int:
+    """Usable-scene count for one record: spawn mode, config ceiling, NO thumbs."""
+    window_start, window_end = _scene_window(record, "spawn")
+    if gee.state().mock:
+        scenes, _n_filtered = gee.mock_scenes(record.id, "spawn", window_start, window_end)
+        return len(scenes)
+    return gee.count_usable_scenes(
+        record.lon, record.lat, record.length_m, window_start, window_end
+    )
+
+
+@app.post("/api/availability/sweep")
+def api_availability_sweep(body: SweepIn) -> dict:
+    ceiling = gee.effective_max_cloud()
+    avail = availability_store.snapshot()
+    is_mock = gee.state().mock
+    targets = [
+        rec
+        for rec in records_store.records
+        if (body.year is None or rec.year == body.year)
+        and (body.region is None or rec.region == body.region)
+        and availability_store.status_of(avail.get(rec.id), ceiling, is_mock) == "unknown"
+    ]
+    # Mock scenes come from a local RNG -- no need to pace those "queries";
+    # mock=True tags the written entries as fabricated (re-checked once EE
+    # is live) so they never hide/unhide real records.
+    sleep_s = 0.0 if is_mock else 0.3
+    state, total = sweep_runner.start(
+        targets, _sweep_check, ceiling, sleep_s=sleep_s, mock=is_mock
+    )
+    return {"ok": True, "state": state, "total": total}
+
+
+@app.get("/api/availability/status")
+def api_availability_status() -> dict:
+    ceiling = gee.effective_max_cloud()
+    avail = availability_store.snapshot()
+    mock_ok = gee.state().mock
+    checked_total = sum(
+        1
+        for rec in records_store.records
+        if availability_store.status_of(avail.get(rec.id), ceiling, mock_ok) != "unknown"
+    )
+    status = sweep_runner.status()
+    status["checked_total"] = checked_total
+    status["unknown_total"] = len(records_store.records) - checked_total
+    return status
 
 
 # ------------------------------------------------------------------- labels

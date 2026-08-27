@@ -27,7 +27,9 @@ const state = {
   statusError: null,
   nRecordsLabeled: null, // records with >=1 label (from /api/records?labeled=labeled)
   notesByScene: {},      // scene_id -> saved notes for the selected record
-  filters: { year: '', region: '', labeled: 'all' },
+  filters: { year: '', region: '', labeled: 'all', hideEmpty: true },
+  nHiddenEmpty: 0,       // records excluded by hide_empty on the last list load
+  recordsToken: 0,       // guards against out-of-order record-list responses
   page: 1,
   total: 0,
   records: [],
@@ -40,6 +42,9 @@ const state = {
   scenesError: null,
   scenesLoading: false,
   scenesToken: 0,        // guards against out-of-order scene responses
+  cloudOverride: false,  // fetch scenes with max_cloud=100; reset on record/mode switch
+  nCloudFiltered: 0,     // scenes dropped by the cloud ceiling on the last scene load
+  maxCloudPct: null,     // ceiling applied on the last scene load (for messaging)
   sceneIdx: 0,
   falseColor: false,
   preload: [],           // Image refs so preloads are not garbage collected
@@ -182,6 +187,8 @@ function loadFilters() {
       if (saved.year != null && /^\d+$/.test(String(saved.year))) state.filters.year = String(saved.year);
       if (saved.region != null) state.filters.region = String(saved.region);
       if (['all', 'unlabeled', 'labeled'].includes(saved.labeled)) state.filters.labeled = saved.labeled;
+      // Default ON; only an explicit boolean overrides it.
+      if (typeof saved.hideEmpty === 'boolean') state.filters.hideEmpty = saved.hideEmpty;
     }
   } catch (e) { /* corrupted storage: ignore */ }
 }
@@ -197,6 +204,16 @@ function onFilterChange() {
   saveFilters();
   state.page = 1;
   loadRecords();
+}
+
+function onHideEmptyChange(e) {
+  state.filters.hideEmpty = e.target.checked;
+  saveFilters();
+  state.page = 1;
+  loadRecords();
+  // Drop focus so single-key label shortcuts are not swallowed by the
+  // focused-INPUT guard in onKeydown.
+  e.target.blur();
 }
 
 function fillSelect(sel, values, current, allLabel) {
@@ -234,62 +251,106 @@ function maxPage() {
   return Math.max(1, Math.ceil(state.total / PAGE_SIZE));
 }
 
-async function loadRecords() {
+/* opts.background: a refresh the user did not ask for (sweep polling) -- it
+ * must not yank the sidebar scroll position back to the selected row. */
+async function loadRecords(opts) {
+  const background = !!(opts && opts.background);
   const q = new URLSearchParams();
   if (state.filters.year) q.set('year', state.filters.year);
   if (state.filters.region) q.set('region', state.filters.region);
   q.set('labeled', state.filters.labeled || 'all');
+  q.set('hide_empty', state.filters.hideEmpty ? '1' : '0');
   q.set('page', String(state.page));
   q.set('page_size', String(PAGE_SIZE));
 
+  // The sweep's periodic list refresh can overlap a user-initiated load;
+  // token-guard so only the newest response is rendered (same pattern as
+  // scenesToken). Records refreshes never touch the scene viewer, so an
+  // in-flight scene load is unaffected.
+  const token = ++state.recordsToken;
   const listEl = $('record-list');
   listEl.classList.add('loading');
   try {
     const data = await fetchJSON('/api/records?' + q.toString());
+    if (token !== state.recordsToken) return;
     state.records = data.records || [];
     state.total = data.total || 0;
     state.page = data.page || 1;
     state.years = data.years || [];
     state.regions = data.regions || [];
+    state.nHiddenEmpty = data.n_hidden_empty || 0;
     const corrected = renderFilterOptions();
     if (corrected) {
       // A stale saved filter was reset; re-query once with the fixed filters
       // (the reset values are always valid, so this cannot loop).
       state.page = 1;
-      await loadRecords();
+      await loadRecords(opts);
       return;
     }
-    renderRecordList();
+    if (!state.records.length && state.page > maxPage()) {
+      // The matching set shrank below this page (e.g. the sweep hid empties
+      // out from under a background refresh); clamp and re-query instead of
+      // rendering a bogus "No records match" over thousands of records.
+      // Cannot loop: page 1 is always <= maxPage().
+      state.page = maxPage();
+      await loadRecords(opts);
+      return;
+    }
+    renderRecordList(!background);
     renderPagination();
+    renderHiddenNote();
   } catch (err) {
-    toast('Failed to load records: ' + (err.message || err), true);
+    if (token === state.recordsToken) {
+      toast('Failed to load records: ' + (err.message || err), true);
+    }
   } finally {
-    listEl.classList.remove('loading');
+    // A stale request must not clear the loading state of a newer one.
+    if (token === state.recordsToken) listEl.classList.remove('loading');
   }
 }
 
-function renderRecordList() {
+function renderHiddenNote() {
+  const el = $('hidden-note');
+  if (state.filters.hideEmpty && state.nHiddenEmpty > 0) {
+    el.textContent = `${state.nHiddenEmpty} hidden`;
+    el.title = `${state.nHiddenEmpty} record(s) with no usable scenes at the current cloud ceiling are hidden`;
+  } else {
+    el.textContent = '';
+    el.title = '';
+  }
+}
+
+function renderRecordList(scrollToSelected = true) {
   const list = $('record-list');
   list.textContent = '';
   if (!state.records.length) {
-    list.append(h('div', 'list-empty', 'No records match these filters.'));
+    const extra = (state.filters.hideEmpty && state.nHiddenEmpty > 0)
+      ? ` ${state.nHiddenEmpty} record(s) with no usable scenes are hidden — uncheck "Hide empty" to show them.`
+      : '';
+    list.append(h('div', 'list-empty', 'No records match these filters.' + extra));
     return;
   }
   for (const rec of state.records) {
     const isSel = state.selected && rec.id === state.selected.id;
     const row = h('div', 'record-row' + (isSel ? ' selected' : ''));
     const meta = [rec.start_date || '—', fmtDims(rec)].filter(Boolean).join(' · ');
+    const metaEl = h('div', 'rec-meta', meta);
+    if (rec.scene_status === 'empty') {
+      // Shown despite being empty (labeled record, or "Hide empty" is off).
+      metaEl.append(' · ', h('span', 'rec-noscene', 'no scenes'));
+      metaEl.title = 'No usable scenes at the current cloud ceiling';
+    }
     row.append(
       h('div', 'rec-top',
         h('span', 'rec-name', rec.location_name || rec.id),
         rec.n_labels > 0 ? h('span', 'rec-dot') : null),
-      h('div', 'rec-meta', meta));
+      metaEl);
     if (rec.n_labels > 0) row.title = `${rec.n_labels} label(s) saved`;
     row.addEventListener('click', () => selectRecord(rec));
     list.append(row);
   }
   const sel = list.querySelector('.record-row.selected');
-  if (sel) sel.scrollIntoView({ block: 'nearest' });
+  if (sel && scrollToSelected) sel.scrollIntoView({ block: 'nearest' });
 }
 
 function renderPagination() {
@@ -312,6 +373,7 @@ function selectRecord(rec) {
   if (state.selected && state.selected.id === rec.id) return;
   state.selected = rec;
   state.sceneIdx = 0;
+  state.cloudOverride = false; // the cloud override lasts one record only
   $('notes-input').value = '';
   renderRecordList();
   renderRecordHeader();
@@ -458,6 +520,7 @@ async function prevRecord() {
 function setMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
+  state.cloudOverride = false; // mode switch clears the cloud override
   renderModeButtons();
   if (state.selected) loadScenes();
 }
@@ -486,20 +549,29 @@ async function loadScenes() {
   state.sceneIdx = 0;
   state.falseColor = false;
   state.notesByScene = {};
+  state.nCloudFiltered = 0;
+  state.maxCloudPct = null;
   clearSegForScene(); // record/mode switch invalidates segment points+mask
   // Never carry a draft note across scene lists (mode toggle / retry) -- it
   // would get saved onto an unrelated scene.
   $('notes-input').value = '';
   renderScenesArea();
+  // cloudOverride disables the regional-cloud ceiling for this record until
+  // the user switches record/mode (override requests skip the backend's
+  // availability cache; labeling works the same either way).
+  let scenesUrl = `/api/records/${encodeURIComponent(rec.id)}/scenes?mode=${state.mode}`;
+  if (state.cloudOverride) scenesUrl += '&max_cloud=100';
   try {
     const [data, labelData] = await Promise.all([
-      fetchJSON(`/api/records/${encodeURIComponent(rec.id)}/scenes?mode=${state.mode}`),
+      fetchJSON(scenesUrl),
       fetchJSON(`/api/labels?record_id=${encodeURIComponent(rec.id)}`).catch(() => null),
     ]);
     if (token !== state.scenesToken) return;
     state.scenes = data.scenes || [];
     state.window = data.window || null;
     state.scenesError = data.error || null;
+    state.nCloudFiltered = data.n_cloud_filtered || 0;
+    state.maxCloudPct = data.max_cloud_pct != null ? data.max_cloud_pct : null;
     if (labelData && Array.isArray(labelData.labels)) {
       for (const row of labelData.labels) state.notesByScene[row.scene_id] = row.notes || '';
     }
@@ -532,10 +604,19 @@ function retryBtn() {
   return b;
 }
 
+function fmtCeiling(x) {
+  if (x == null) return '?'; // Number(null) is 0 -- it would pass isFinite
+  const n = Number(x);
+  if (!isFinite(n)) return '?';
+  return String(Math.round(n * 10) / 10);
+}
+
 function renderScenesArea() {
   $('scenes-loading').hidden = !state.scenesLoading;
   $('window-label').textContent = state.window
-    ? `window ${state.window.start} → ${state.window.end}` : '';
+    ? `window ${state.window.start} → ${state.window.end}`
+      + (state.cloudOverride ? ' · cloud ceiling off' : '')
+    : '';
 
   const errEl = $('scenes-error');
   const strip = $('filmstrip');
@@ -544,6 +625,7 @@ function renderScenesArea() {
 
   errEl.hidden = true;
   errEl.textContent = '';
+  errEl.classList.remove('cloudy');
 
   if (state.scenesLoading) {
     strip.hidden = true;
@@ -560,10 +642,27 @@ function renderScenesArea() {
       retryBtn());
   } else if (!hasScenes) {
     errEl.hidden = false;
-    errEl.append(
-      h('div', 'err-title', 'No scenes found'),
-      h('div', 'err-body', 'No usable satellite scenes were found in this window.'),
-      retryBtn());
+    if (state.nCloudFiltered > 0 && !state.cloudOverride) {
+      // Scenes exist but the regional-cloud ceiling dropped all of them.
+      errEl.classList.add('cloudy');
+      const showBtn = h('button', 'btn accent', 'Show cloudy scenes');
+      showBtn.type = 'button';
+      showBtn.addEventListener('click', () => {
+        state.cloudOverride = true; // lasts until record/mode switch
+        loadScenes();
+      });
+      errEl.append(
+        h('div', 'err-title', 'All scenes too cloudy'),
+        h('div', 'err-body',
+          `${state.nCloudFiltered} scene(s) in this window exceeded the `
+          + `${fmtCeiling(state.maxCloudPct)}% cloud ceiling.`),
+        showBtn);
+    } else {
+      errEl.append(
+        h('div', 'err-title', 'No scenes found'),
+        h('div', 'err-body', 'No usable satellite scenes were found in this window.'),
+        retryBtn());
+    }
   }
 
   strip.hidden = !hasScenes;
@@ -1175,6 +1274,137 @@ function renderSegPanel() {
   panel.append(h('div', 'seg-row', scoreWrap, stats, segClearBtn()));
 }
 
+/* ---------------- scene availability sweep ---------------- */
+/*
+ * Frozen contract (backend built separately):
+ *   POST /api/availability/sweep {year, region}
+ *        -> {ok:true, state:"started"|"already_running", total:int}
+ *   GET  /api/availability/status
+ *        -> {running, done, total, empty_found, checked_total, unknown_total}
+ * The sweep caches scene availability per record; /api/records reflects the
+ * cache immediately, so the list is refreshed while the sweep runs.
+ */
+
+const sweep = {
+  timer: null,      // the single polling interval (guarded: never stacked)
+  pollCount: 0,     // refresh the record list every 3rd poll
+  last: null,       // last /api/availability/status payload
+  doneTimer: null,  // clears the brief "done" note
+};
+
+async function startSweep() {
+  const btn = $('scan-btn');
+  if (btn.disabled) return;
+  btn.disabled = true; // polling re-enables it once running is false
+  btn.blur();          // keep single-key label shortcuts live
+  const body = {
+    year: state.filters.year ? Number(state.filters.year) : null,
+    region: state.filters.region || null,
+  };
+  try {
+    const d = await fetchJSON('/api/availability/sweep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (d.state === 'already_running') toast('Scene scan already running.');
+    beginSweepPolling();
+  } catch (err) {
+    btn.disabled = false;
+    toast('Could not start scan: ' + (err.message || err), true);
+  }
+}
+
+function beginSweepPolling() {
+  if (sweep.timer != null) return; // already polling: never leak a 2nd interval
+  sweep.pollCount = 0;
+  sweep.timer = setInterval(pollSweep, 4000);
+  pollSweep();
+}
+
+function stopSweepPolling() {
+  if (sweep.timer != null) {
+    clearInterval(sweep.timer);
+    sweep.timer = null;
+  }
+}
+
+async function pollSweep() {
+  let s = null;
+  try {
+    s = await fetchJSON('/api/availability/status');
+  } catch (err) { /* backend unreachable: fall through and stop polling */ }
+  if (s) {
+    sweep.last = s;
+  } else if (sweep.last && sweep.last.running) {
+    // Failed poll: clear the stale "running" payload BEFORE rendering, or
+    // renderSweepUI would freeze the progress label and leave the Scan
+    // button disabled forever (a disabled button can never restart a scan).
+    sweep.last = Object.assign({}, sweep.last, { running: false });
+  }
+
+  if (s && s.running) {
+    sweep.pollCount += 1;
+    renderSweepUI();
+    // Refresh the sidebar every 3rd poll so newly-found empties drop out
+    // progressively. loadRecords keeps selection by record id and never
+    // touches the scene viewer, so an in-flight scene load is unaffected.
+    if (sweep.pollCount % 3 === 0) loadRecords({ background: true });
+    return;
+  }
+
+  const wasActive = sweep.timer != null;
+  stopSweepPolling();
+  renderSweepUI();
+  if (s && wasActive) {
+    // Sweep finished (or was finished by the time we first polled).
+    showSweepDone(s);
+    loadRecords({ background: true });
+  }
+}
+
+function renderSweepUI() {
+  const btn = $('scan-btn');
+  const prog = $('scan-progress');
+  const s = sweep.last;
+  const running = !!(s && s.running);
+  btn.disabled = running;
+  if (s) {
+    btn.title = `${s.checked_total} record(s) checked for scenes · ${s.unknown_total} unchecked`;
+  }
+  if (running) {
+    if (sweep.doneTimer) { clearTimeout(sweep.doneTimer); sweep.doneTimer = null; }
+    prog.textContent = `scanning ${s.done}/${s.total}…`;
+    prog.hidden = false;
+  } else if (sweep.doneTimer == null) {
+    prog.textContent = '';
+    prog.hidden = true;
+  }
+}
+
+function showSweepDone(s) {
+  const prog = $('scan-progress');
+  prog.textContent = `done — ${s.empty_found} empty hidden`;
+  prog.hidden = false;
+  if (sweep.doneTimer) clearTimeout(sweep.doneTimer);
+  sweep.doneTimer = setTimeout(() => {
+    sweep.doneTimer = null;
+    prog.textContent = '';
+    prog.hidden = true;
+  }, 6000);
+}
+
+/* One-shot at startup: resume progress display if a sweep is running
+ * (e.g. the page was reloaded mid-sweep). */
+async function sweepInitCheck() {
+  try {
+    const s = await fetchJSON('/api/availability/status');
+    sweep.last = s;
+    if (s.running) beginSweepPolling();
+    else renderSweepUI();
+  } catch (err) { /* endpoint absent / backend down: button still works on click */ }
+}
+
 /* ---------------- keyboard ---------------- */
 
 function onKeydown(e) {
@@ -1220,6 +1450,8 @@ function wireEvents() {
   $('filter-year').addEventListener('change', onFilterChange);
   $('filter-region').addEventListener('change', onFilterChange);
   $('filter-labeled').addEventListener('change', onFilterChange);
+  $('hide-empty').addEventListener('change', onHideEmptyChange);
+  $('scan-btn').addEventListener('click', startSweep);
   $('page-prev').addEventListener('click', () => gotoPage(state.page - 1));
   $('page-next').addEventListener('click', () => gotoPage(state.page + 1));
   $('mode-spawn').addEventListener('click', () => setMode('spawn'));
@@ -1248,11 +1480,13 @@ function wireEvents() {
 function init() {
   loadFilters();
   $('filter-labeled').value = state.filters.labeled;
+  $('hide-empty').checked = state.filters.hideEmpty;
   renderModeButtons();
   wireEvents();
   loadStatus();
   setInterval(loadStatus, 60000);
   loadRecords();
+  sweepInitCheck();
 }
 
 document.addEventListener('DOMContentLoaded', init);

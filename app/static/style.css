@@ -215,6 +215,58 @@ a:hover { text-decoration: underline; }
 
 #filters select:focus { border-color: var(--accent); }
 
+/* availability row: hide-empty toggle + scene scan */
+
+#avail-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 2px;
+}
+
+#hide-empty-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+#hide-empty-label input {
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#hidden-note {
+  flex: 1 1 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+#scan-progress {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+#scan-btn {
+  flex: none;
+  font-size: 11.5px;
+  padding: 4px 9px;
+}
+
 /* record list */
 
 #record-list {
@@ -279,6 +331,11 @@ a:hover { text-decoration: underline; }
   margin-top: 1px;
 }
 
+.rec-noscene {
+  color: var(--faint);
+  font-style: italic;
+}
+
 /* pagination */
 
 #pagination {
@@ -337,6 +394,14 @@ a:hover { text-decoration: underline; }
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.btn.accent {
+  background: var(--accent-soft);
+  border-color: rgba(63, 211, 228, 0.5);
+  color: var(--accent);
+}
+
+.btn.accent:hover:not(:disabled) { border-color: var(--accent); }
 
 /* ---------- main panel ---------- */
 
@@ -490,6 +555,15 @@ a:hover { text-decoration: underline; }
   margin: 6px 0 10px;
   word-break: break-word;
 }
+
+/* "all scenes too cloudy" is a filter outcome, not an error: amber, not red */
+
+.error-card.cloudy {
+  background: rgba(240, 180, 47, 0.07);
+  border-color: rgba(240, 180, 47, 0.35);
+}
+
+.error-card.cloudy .err-title { color: var(--amber); }
 
 /* ---------- filmstrip ---------- */
 

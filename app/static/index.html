@@ -35,6 +35,17 @@
             <option value="labeled">Labeled</option>
           </select>
         </label>
+        <div id="avail-row">
+          <label id="hide-empty-label"
+                 title="Hide records with no usable scenes at the current cloud ceiling (records you have labeled always stay listed)">
+            <input id="hide-empty" type="checkbox">
+            <span>Hide empty</span>
+          </label>
+          <span id="hidden-note"></span>
+          <span id="scan-progress" hidden></span>
+          <button id="scan-btn" class="btn ghost" type="button"
+                  title="Check the filtered records for usable scenes">Scan for scenes</button>
+        </div>
       </div>
 
       <div id="record-list"></div>

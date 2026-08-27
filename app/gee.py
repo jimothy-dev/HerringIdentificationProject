@@ -177,16 +177,29 @@ def _chip_region(lon: float, lat: float, length_m: float | None):
 
 # ------------------------------------------------------------- scene search
 
+def effective_max_cloud(override: float | None = None) -> float:
+    """The regional-cloud ceiling to apply: the override when given, else config."""
+    if override is not None:
+        return float(override)
+    return float(get_config().get("max_cloud_pct", 70))
+
+
 def search_scenes(
     lon: float,
     lat: float,
     length_m: float | None,
     window_start: dt.date,
     window_end: dt.date,
-) -> list[dict[str, Any]]:
-    """Return scene dicts (scene_id, sensor, date, cloud_region_pct, thumb urls).
+    max_cloud_override: float | None = None,
+    with_thumbs: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (scenes, n_cloud_filtered) for the window.
 
-    Sorted by date asc, one scene per (sensor, date), capped at max_scenes.
+    Scenes are dicts (scene_id, sensor, date, cloud_region_pct, and thumb urls
+    when with_thumbs), sorted by date asc, one per (sensor, date), capped at
+    max_scenes. n_cloud_filtered counts DEDUPED scenes dropped by the cloud
+    ceiling (config max_cloud_pct, or max_cloud_override for this call only),
+    i.e. distinct scene slots the user would otherwise have seen.
     Raises GeeError with a user-facing message on failure.
     """
     cfg = get_config()
@@ -198,16 +211,39 @@ def search_scenes(
     except Exception as exc:  # noqa: BLE001
         raise GeeError(f"Scene search failed: {exc}") from exc
 
-    # Drop scenes too cloudy over the spawn site to be labelable; scenes whose
+    # Dedupe FIRST so n_cloud_filtered counts distinct scene slots, then drop
+    # scenes too cloudy over the spawn site to be labelable; scenes whose
     # regional cloud could not be computed (None) are kept — unknown != bad.
-    max_cloud = float(cfg.get("max_cloud_pct", 70))
-    raw = [
-        s for s in raw
-        if s.get("cloud_region_pct") is None or s["cloud_region_pct"] <= max_cloud
-    ]
-    scenes = _dedupe_and_cap(raw, int(cfg["max_scenes"]))
-    _attach_thumbs(scenes, lon, lat, length_m)
-    return scenes
+    # Dedupe is ceiling-aware: within a (sensor, date) slot a scene that
+    # passes the ceiling always survives over one that fails it, so a known
+    # over-ceiling duplicate can never knock out a labelable scene. A slot is
+    # counted in n_cloud_filtered exactly when NO member passes the ceiling.
+    max_cloud = effective_max_cloud(max_cloud_override)
+    deduped = _dedupe(raw, max_cloud)
+    kept = [s for s in deduped if _passes_ceiling(s, max_cloud)]
+    n_cloud_filtered = len(deduped) - len(kept)
+    scenes = _cap_and_sort(kept, int(cfg["max_scenes"]))
+    if with_thumbs:
+        _attach_thumbs(scenes, lon, lat, length_m)
+    return scenes, n_cloud_filtered
+
+
+def count_usable_scenes(
+    lon: float,
+    lat: float,
+    length_m: float | None,
+    window_start: dt.date,
+    window_end: dt.date,
+) -> int:
+    """Metadata-only availability probe: usable-scene count at the config ceiling.
+
+    Skips thumbnail generation entirely (the expensive part of search_scenes),
+    which makes this the path the background availability sweep uses.
+    """
+    scenes, _n_cloud_filtered = search_scenes(
+        lon, lat, length_m, window_start, window_end, with_thumbs=False
+    )
+    return len(scenes)
 
 
 def _fetch_scene_metadata(
@@ -355,15 +391,36 @@ def _features_to_scenes(
     return scenes
 
 
-def _dedupe_and_cap(scenes: list[dict[str, Any]], max_scenes: int) -> list[dict[str, Any]]:
-    """One scene per (sensor, date) keeping the lowest regional cloud, then cap."""
+def _passes_ceiling(scene: dict[str, Any], max_cloud: float) -> bool:
+    """Whether a scene survives the regional-cloud ceiling (None = unknown passes)."""
+    cloud = scene.get("cloud_region_pct")
+    return cloud is None or float(cloud) <= float(max_cloud)
+
+
+def _dedupe(scenes: list[dict[str, Any]], max_cloud: float) -> list[dict[str, Any]]:
+    """One scene per (sensor, date): prefer scenes that pass the cloud ceiling
+    (unknown cloud counts as passing), then the lowest regional cloud.
+
+    Ceiling-awareness matters: with a plain lowest-cloud rule, a known 80%
+    duplicate would beat an unknown-cloud scene (999 sort key) and the whole
+    slot would then be dropped by the ceiling — hiding a labelable scene.
+    """
     best: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def rank(sc: dict[str, Any]) -> tuple[bool, float]:
+        return (not _passes_ceiling(sc, max_cloud), _cloud_sort_key(sc))
+
     for sc in scenes:
         key = (sc["sensor"], sc["date"])
         prev = best.get(key)
-        if prev is None or _cloud_sort_key(sc) < _cloud_sort_key(prev):
+        if prev is None or rank(sc) < rank(prev):
             best[key] = sc
-    result = list(best.values())
+    return list(best.values())
+
+
+def _cap_and_sort(scenes: list[dict[str, Any]], max_scenes: int) -> list[dict[str, Any]]:
+    """Cap at max_scenes (keeping the least cloudy), then sort by date asc."""
+    result = list(scenes)
     if len(result) > max_scenes:
         # Keep the max_scenes least-cloudy scenes across all sensors...
         result.sort(key=_cloud_sort_key)
@@ -470,8 +527,12 @@ def mock_scenes(
     mode: str,
     window_start: dt.date,
     window_end: dt.date,
-) -> list[dict[str, Any]]:
+    max_cloud_override: float | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     """Deterministic fabricated scenes so the UI is fully usable before EE auth.
+
+    Returns (scenes, n_cloud_filtered), the same shape as search_scenes, with
+    the same cloud ceiling / override applied.
 
     6-10 scenes spread across the window (every ~3-5 days for typical windows),
     alternating sensors, seeded from the record id so results are stable across
@@ -506,9 +567,12 @@ def mock_scenes(
                 "thumb_false": f"/api/mock_thumb/{mock_thumb_seed(record_id, scene_id, 'false')}.png",
             }
         )
-    # Same cloud ceiling as real scenes, so mock mode previews the filter too.
-    max_cloud = float(get_config().get("max_cloud_pct", 70))
-    return [s for s in scenes if s["cloud_region_pct"] <= max_cloud]
+    # Same cloud ceiling (and override) as real scenes, so mock mode previews
+    # the filter too. The fabricated list is already one scene per (sensor,
+    # date), i.e. deduped, so the filtered count matches distinct scene slots.
+    max_cloud = effective_max_cloud(max_cloud_override)
+    kept = [s for s in scenes if s["cloud_region_pct"] <= max_cloud]
+    return kept, len(scenes) - len(kept)
 
 
 def mock_thumb_seed(record_id: str, scene_id: str, kind: str) -> str:

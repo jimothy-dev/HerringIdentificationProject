@@ -101,14 +101,18 @@ class RecordStore:
         page: int = 1,
         page_size: int = 50,
         n_labels_fn: Callable[[str], int] | None = None,
-    ) -> tuple[int, list[tuple[SpawnRecord, int]]]:
-        """Return (total, [(record, n_labels), ...]) for the requested page.
+        exclude_fn: Callable[[SpawnRecord, int], bool] | None = None,
+    ) -> tuple[int, int, list[tuple[SpawnRecord, int]]]:
+        """Return (total, n_excluded, [(record, n_labels), ...]) for the page.
 
         `labeled` is "all" | "unlabeled" | "labeled"; a record counts as
-        labeled when it has >= 1 saved label.
+        labeled when it has >= 1 saved label. `exclude_fn(record, n_labels)`
+        returning True drops a record that matched every other filter (counted
+        in n_excluded) BEFORE pagination, so pages stay full.
         """
         count = n_labels_fn or (lambda _rid: 0)
         matched: list[tuple[SpawnRecord, int]] = []
+        n_excluded = 0
         for rec in self.records:
             if year is not None and rec.year != year:
                 continue
@@ -119,13 +123,16 @@ class RecordStore:
                 continue
             if labeled == "unlabeled" and n >= 1:
                 continue
+            if exclude_fn is not None and exclude_fn(rec, n):
+                n_excluded += 1
+                continue
             matched.append((rec, n))
 
         total = len(matched)
         page = max(1, page)
         page_size = max(1, min(page_size, 500))
         start = (page - 1) * page_size
-        return total, matched[start : start + page_size]
+        return total, n_excluded, matched[start : start + page_size]
 
 
 def _load_records(csv_path: Path) -> list[SpawnRecord]:
