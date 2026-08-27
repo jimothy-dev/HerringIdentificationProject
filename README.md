@@ -71,6 +71,7 @@ clear `data/labels.csv` before starting real labeling.
 | `pre_days` | `3` | Days before the record's `StartDate` included in the spawn-window scene search. |
 | `post_days` | `10` | Days after the `EndDate` (or `StartDate` if no end date) included in the spawn-window search. |
 | `max_scenes` | `16` | Cap on scenes returned per query. When more exist, the least-cloudy 16 are kept, then shown date-ascending. |
+| `max_cloud_pct` | `70` | Scenes with regional cloud cover above this percentage are dropped from results (unknown cloud is kept). |
 | `chip_min_half_m` | `600` | Minimum chip half-size in metres. Chip half-size is `clamp(0.35 * spawn_length + 300, min, max)`; 1200 m when the record has no length. |
 | `chip_max_half_m` | `2500` | Maximum chip half-size in metres. |
 | `download_chips` | `true` | Download a GeoTIFF chip in the background when a scene is labeled positive/negative (real EE mode only). |

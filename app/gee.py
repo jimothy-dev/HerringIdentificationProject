@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pre_days": 3,
     "post_days": 10,
     "max_scenes": 16,
+    "max_cloud_pct": 70,
     "chip_min_half_m": 600,
     "chip_max_half_m": 2500,
     "download_chips": True,
@@ -197,6 +198,13 @@ def search_scenes(
     except Exception as exc:  # noqa: BLE001
         raise GeeError(f"Scene search failed: {exc}") from exc
 
+    # Drop scenes too cloudy over the spawn site to be labelable; scenes whose
+    # regional cloud could not be computed (None) are kept — unknown != bad.
+    max_cloud = float(cfg.get("max_cloud_pct", 70))
+    raw = [
+        s for s in raw
+        if s.get("cloud_region_pct") is None or s["cloud_region_pct"] <= max_cloud
+    ]
     scenes = _dedupe_and_cap(raw, int(cfg["max_scenes"]))
     _attach_thumbs(scenes, lon, lat, length_m)
     return scenes
@@ -498,7 +506,9 @@ def mock_scenes(
                 "thumb_false": f"/api/mock_thumb/{mock_thumb_seed(record_id, scene_id, 'false')}.png",
             }
         )
-    return scenes
+    # Same cloud ceiling as real scenes, so mock mode previews the filter too.
+    max_cloud = float(get_config().get("max_cloud_pct", 70))
+    return [s for s in scenes if s["cloud_region_pct"] <= max_cloud]
 
 
 def mock_thumb_seed(record_id: str, scene_id: str, kind: str) -> str:
