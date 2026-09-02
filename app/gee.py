@@ -192,6 +192,7 @@ def search_scenes(
     window_end: dt.date,
     max_cloud_override: float | None = None,
     with_thumbs: bool = True,
+    sensors_override: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Return (scenes, n_cloud_filtered) for the window.
 
@@ -203,7 +204,8 @@ def search_scenes(
     Raises GeeError with a user-facing message on failure.
     """
     cfg = get_config()
-    sensors = [s.lower() for s in cfg.get("sensors", ["s2", "l8", "l9"])]
+    source = sensors_override if sensors_override else cfg.get("sensors", ["s2", "l8", "l9"])
+    sensors = [s.lower() for s in source]
     try:
         raw = _fetch_scene_metadata(lon, lat, length_m, window_start, window_end, sensors)
     except GeeError:
@@ -528,6 +530,7 @@ def mock_scenes(
     window_start: dt.date,
     window_end: dt.date,
     max_cloud_override: float | None = None,
+    sensors_override: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Deterministic fabricated scenes so the UI is fully usable before EE auth.
 
@@ -540,8 +543,9 @@ def mock_scenes(
     """
     cfg = get_config()
     name_map = {"s2": "S2", "l8": "L8", "l9": "L9"}
+    sensor_source = sensors_override if sensors_override else cfg.get("sensors", ["s2", "l8", "l9"])
     sensor_cycle = [
-        name_map[s.lower()] for s in cfg.get("sensors", ["s2", "l8", "l9"]) if s.lower() in name_map
+        name_map[s.lower()] for s in sensor_source if s.lower() in name_map
     ] or ["S2"]
 
     seed_int = int(hashlib.md5(f"{record_id}:{mode}".encode()).hexdigest()[:12], 16)

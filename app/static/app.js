@@ -27,7 +27,11 @@ const state = {
   statusError: null,
   nRecordsLabeled: null, // records with >=1 label (from /api/records?labeled=labeled)
   notesByScene: {},      // scene_id -> saved notes for the selected record
-  filters: { year: '', region: '', labeled: 'all', hideEmpty: true },
+  filters: {
+    year: '', region: '', labeled: 'all', hideEmpty: true,
+    sensors: { s2: true, l8: true, l9: true },  // satellite toggles
+    maxCloud: 70,                               // cloud ceiling (server default 70)
+  },
   nHiddenEmpty: 0,       // records excluded by hide_empty on the last list load
   recordsToken: 0,       // guards against out-of-order record-list responses
   page: 1,
@@ -189,12 +193,86 @@ function loadFilters() {
       if (['all', 'unlabeled', 'labeled'].includes(saved.labeled)) state.filters.labeled = saved.labeled;
       // Default ON; only an explicit boolean overrides it.
       if (typeof saved.hideEmpty === 'boolean') state.filters.hideEmpty = saved.hideEmpty;
+      if (saved.sensors && typeof saved.sensors === 'object') {
+        for (const s of ['s2', 'l8', 'l9']) {
+          if (typeof saved.sensors[s] === 'boolean') state.filters.sensors[s] = saved.sensors[s];
+        }
+        // Never restore an all-off state: it would query nothing forever.
+        if (!state.filters.sensors.s2 && !state.filters.sensors.l8 && !state.filters.sensors.l9) {
+          state.filters.sensors = { s2: true, l8: true, l9: true };
+        }
+      }
+      if (typeof saved.maxCloud === 'number' && saved.maxCloud >= 0 && saved.maxCloud <= 100) {
+        state.filters.maxCloud = Math.round(saved.maxCloud);
+      }
     }
   } catch (e) { /* corrupted storage: ignore */ }
 }
 
 function saveFilters() {
   try { localStorage.setItem(LS_KEY, JSON.stringify(state.filters)); } catch (e) { /* ignore */ }
+}
+
+/* ---------------- scene controls (satellites + cloud ceiling) ---------------- */
+
+function renderSceneControls() {
+  $('sensor-s2').checked = state.filters.sensors.s2;
+  $('sensor-l8').checked = state.filters.sensors.l8;
+  $('sensor-l9').checked = state.filters.sensors.l9;
+  $('cloud-slider').value = String(state.filters.maxCloud);
+  $('cloud-number').value = String(state.filters.maxCloud);
+}
+
+function onSensorChange(e) {
+  const boxes = { s2: $('sensor-s2'), l8: $('sensor-l8'), l9: $('sensor-l9') };
+  if (!boxes.s2.checked && !boxes.l8.checked && !boxes.l9.checked) {
+    e.target.checked = true; // at least one satellite must stay on
+    toast('At least one satellite must stay enabled', true);
+    return;
+  }
+  for (const s of ['s2', 'l8', 'l9']) state.filters.sensors[s] = boxes[s].checked;
+  saveFilters();
+  e.target.blur(); // keep single-key label shortcuts working
+  if (state.selected) loadScenes();
+}
+
+let cloudReloadTimer = null;
+function setCloudCeiling(value, reloadDelayMs) {
+  let v = Math.round(Number(value));
+  if (!isFinite(v)) v = 70;
+  v = Math.max(0, Math.min(100, v));
+  state.filters.maxCloud = v;
+  $('cloud-slider').value = String(v);
+  $('cloud-number').value = String(v);
+  saveFilters();
+  // Debounced so dragging the slider fires one query, not twenty.
+  clearTimeout(cloudReloadTimer);
+  cloudReloadTimer = setTimeout(() => { if (state.selected) loadScenes(); }, reloadDelayMs);
+}
+
+/* ---------------- dataset export ---------------- */
+
+async function exportDataset() {
+  const btn = $('export-btn');
+  const note = $('export-note');
+  btn.disabled = true;
+  note.textContent = 'building…';
+  try {
+    const res = await fetchJSON('/api/export', { method: 'POST' });
+    if (!res.ok) throw new Error(res.error || 'export failed');
+    note.textContent = `${res.n_labels} labels · ${res.n_chips} chips · ${(res.size_bytes / 1048576).toFixed(1)} MB`;
+    const a = document.createElement('a');
+    a.href = '/api/export/' + encodeURIComponent(res.filename);
+    a.download = res.filename;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    toast('Dataset exported — download started');
+  } catch (err) {
+    note.textContent = '';
+    toast('Export failed: ' + (err.message || err), true);
+  }
+  btn.disabled = false;
 }
 
 function onFilterChange() {
@@ -561,6 +639,9 @@ async function loadScenes() {
   // availability cache; labeling works the same either way).
   let scenesUrl = `/api/records/${encodeURIComponent(rec.id)}/scenes?mode=${state.mode}`;
   if (state.cloudOverride) scenesUrl += '&max_cloud=100';
+  else if (state.filters.maxCloud !== 70) scenesUrl += '&max_cloud=' + state.filters.maxCloud;
+  const sensorsOn = ['s2', 'l8', 'l9'].filter((s) => state.filters.sensors[s]);
+  if (sensorsOn.length > 0 && sensorsOn.length < 3) scenesUrl += '&sensors=' + sensorsOn.join(',');
   try {
     const [data, labelData] = await Promise.all([
       fetchJSON(scenesUrl),
@@ -615,7 +696,8 @@ function renderScenesArea() {
   $('scenes-loading').hidden = !state.scenesLoading;
   $('window-label').textContent = state.window
     ? `window ${state.window.start} → ${state.window.end}`
-      + (state.cloudOverride ? ' · cloud ceiling off' : '')
+      + (state.cloudOverride ? ' · cloud ceiling off'
+        : (state.filters.maxCloud !== 70 ? ` · cloud ≤ ${state.filters.maxCloud}%` : ''))
     : '';
 
   const errEl = $('scenes-error');
@@ -1452,6 +1534,12 @@ function wireEvents() {
   $('filter-labeled').addEventListener('change', onFilterChange);
   $('hide-empty').addEventListener('change', onHideEmptyChange);
   $('scan-btn').addEventListener('click', startSweep);
+  $('sensor-s2').addEventListener('change', onSensorChange);
+  $('sensor-l8').addEventListener('change', onSensorChange);
+  $('sensor-l9').addEventListener('change', onSensorChange);
+  $('cloud-slider').addEventListener('input', (e) => setCloudCeiling(e.target.value, 450));
+  $('cloud-number').addEventListener('change', (e) => setCloudCeiling(e.target.value, 100));
+  $('export-btn').addEventListener('click', exportDataset);
   $('page-prev').addEventListener('click', () => gotoPage(state.page - 1));
   $('page-next').addEventListener('click', () => gotoPage(state.page + 1));
   $('mode-spawn').addEventListener('click', () => setMode('spawn'));
@@ -1481,6 +1569,7 @@ function init() {
   loadFilters();
   $('filter-labeled').value = state.filters.labeled;
   $('hide-empty').checked = state.filters.hideEmpty;
+  renderSceneControls();
   renderModeButtons();
   wireEvents();
   loadStatus();

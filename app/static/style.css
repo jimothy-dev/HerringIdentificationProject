@@ -1021,3 +1021,91 @@ a:hover { text-decoration: underline; }
 #toast.show { opacity: 1; transform: translateY(0); }
 
 #toast.error { border-color: rgba(244, 115, 111, 0.55); color: #f8b4b1; }
+
+/* ---------- scene controls (satellites + cloud ceiling) ---------- */
+
+#scene-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.sc-label {
+  font-size: 10.5px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sc-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.sensor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--muted);
+  user-select: none;
+}
+
+.sensor-toggle:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.sensor-toggle input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+#cloud-slider {
+  width: 130px;
+  accent-color: var(--accent);
+}
+
+#cloud-number {
+  width: 58px;
+  background: var(--bg-deep);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  outline: none;
+}
+
+#cloud-number:focus { border-color: var(--accent); }
+
+/* ---------- dataset export ---------- */
+
+#export-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+#export-note {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}

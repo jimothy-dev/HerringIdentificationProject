@@ -56,6 +56,12 @@
         <button id="page-next" class="btn ghost" type="button">Next &#8250;</button>
       </div>
 
+      <div id="export-row">
+        <button id="export-btn" class="btn" type="button"
+                title="Zip labels.csv, all GeoTIFF chips, and a format README, then download it">Export dataset</button>
+        <span id="export-note"></span>
+      </div>
+
       <footer id="key-help">
         <span><kbd>P</kbd><kbd>N</kbd><kbd>U</kbd><kbd>X</kbd><kbd>C</kbd> label</span>
         <span><kbd>&#8592;</kbd><kbd>&#8594;</kbd> scenes</span>
@@ -83,6 +89,18 @@
             <button id="mode-offseason" class="mode-btn" type="button">Off-season (negatives)</button>
           </div>
           <span id="window-label" title="Imagery query window"></span>
+        </div>
+
+        <div id="scene-controls">
+          <span class="sc-label">Satellites</span>
+          <label class="sensor-toggle" title="Sentinel-2 (10 m)"><input id="sensor-s2" type="checkbox" checked><span>S2</span></label>
+          <label class="sensor-toggle" title="Landsat 8 (30 m)"><input id="sensor-l8" type="checkbox" checked><span>L8</span></label>
+          <label class="sensor-toggle" title="Landsat 9 (30 m)"><input id="sensor-l9" type="checkbox" checked><span>L9</span></label>
+          <span class="sc-divider"></span>
+          <span class="sc-label" title="Scenes cloudier than this over the spawn site are hidden">Cloud &le;</span>
+          <input id="cloud-slider" type="range" min="0" max="100" step="5">
+          <input id="cloud-number" type="number" min="0" max="100" step="5">
+          <span class="sc-label">%</span>
         </div>
 
         <div id="scenes-loading" hidden>

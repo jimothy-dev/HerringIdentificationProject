@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import availability, gee, segment
+from app import availability, export_data, gee, segment
 from app.labels import VALID_LABELS, LabelStore
 from app.records import RecordStore, SpawnRecord
 
@@ -135,7 +135,15 @@ def api_scenes(
     record_id: str,
     mode: Literal["spawn", "offseason"] = Query(default="spawn"),
     max_cloud: float | None = Query(default=None, ge=0, le=100),
+    sensors: str | None = Query(default=None, max_length=20),
 ) -> dict:
+    # Per-request satellite selection ("s2,l8"); unknown names are dropped and
+    # an empty/garbage value falls back to the config default.
+    sensors_list: list[str] | None = None
+    if sensors:
+        sensors_list = [s for s in (p.strip().lower() for p in sensors.split(",")) if s in ("s2", "l8", "l9")]
+        if not sensors_list or len(sensors_list) == 3:
+            sensors_list = None
     record = records_store.get(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Unknown record id: {record_id}")
@@ -154,7 +162,8 @@ def api_scenes(
     st = gee.state()
     if st.mock:
         scenes, n_cloud_filtered = gee.mock_scenes(
-            record_id, mode, window_start, window_end, max_cloud_override=max_cloud
+            record_id, mode, window_start, window_end,
+            max_cloud_override=max_cloud, sensors_override=sensors_list,
         )
     else:
         try:
@@ -165,6 +174,7 @@ def api_scenes(
                 window_start,
                 window_end,
                 max_cloud_override=max_cloud,
+                sensors_override=sensors_list,
             )
         except gee.GeeError as exc:
             response["error"] = str(exc)
@@ -173,7 +183,7 @@ def api_scenes(
     # Organic availability update: only a spawn-mode search at the config
     # ceiling describes availability (override requests must not touch it).
     # Mock-mode results are tagged so they are re-checked once EE is live.
-    if mode == "spawn" and max_cloud is None:
+    if mode == "spawn" and max_cloud is None and sensors_list is None:
         availability_store.set(
             record_id, len(scenes), gee.effective_max_cloud(), mock=st.mock
         )
@@ -364,6 +374,27 @@ def api_delete_label(record_id: str = Query(...), scene_id: str = Query(...)) ->
 @app.get("/api/labels")
 def api_get_labels(record_id: str | None = Query(default=None)) -> dict:
     return {"labels": label_store.all_rows(record_id)}
+
+
+# ------------------------------------------------------------------- export
+
+@app.post("/api/export")
+def api_export() -> dict:
+    """Build a dated zip of labels.csv + chips + a format README."""
+    try:
+        info = export_data.build_export()
+        return {"ok": True, **info}
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, never a 500
+        log.warning("export failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/api/export/{filename}")
+def api_export_download(filename: str) -> FileResponse:
+    p = export_data.safe_export_path(filename)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Unknown export file")
+    return FileResponse(p, media_type="application/zip", filename=filename)
 
 
 # ------------------------------------------------------------------ segment

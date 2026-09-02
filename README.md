@@ -29,6 +29,8 @@ The defaults are sensible. The ones you might change:
 
 Click a record in the sidebar, then work through its scenes: `P` positive, `N` negative, `U` unsure, `X` unusable, `C` clear. Arrow keys switch scenes, `J`/`K` switch records, `F` toggles false color, `M` toggles off-season mode (Aug–Sep, for easy negatives). Labeling auto-advances.
 
+Above the filmstrip you can toggle which satellites to search (S2 / L8 / L9) and set the cloud ceiling with a slider or number box — both apply immediately and are remembered.
+
 Because of the cloud ceiling, some records have no usable scenes. "Hide empty" in the sidebar hides those (never ones you've labeled), and "Scan for scenes" checks the current filter's records in the background so the list thins out ahead of you. If a record's scenes were all dropped for cloud, the viewer says so and offers "Show cloudy scenes".
 
 ## Segment mode
@@ -42,6 +44,8 @@ The score is currently a spectral heuristic (milt is bright in visible, dark in 
 - `data/labels.csv` — one row per labeled scene, with record/scene ids, coordinates, dates, label, and chip path
 - `data/chips/positive|negative/*.tif` — GeoTIFF chips: S2 at 10 m (B2,B3,B4,B8,B11,B12), Landsat at 30 m, TOA reflectance
 - `data/scene_availability.json` — cache behind hide-empty/scan (regenerates itself)
+
+The "Export dataset" button in the sidebar zips `labels.csv`, all chips, and a format README into `data/exports/` and downloads it — ready to hand to a collaborator.
 
 ## Roadmap
 
