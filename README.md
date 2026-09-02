@@ -48,3 +48,9 @@ The score is currently a spectral heuristic (milt is bright in visible, dark in 
 1. Label chips with this app — done, ongoing
 2. Train a spawn/not-spawn classifier on the chips
 3. Plug the classifier into segment mode (slot already wired)
+
+## Licence
+
+[GNU General Public License v3.0](LICENSE). Free to use, change and share, including commercially. Anything you distribute that is built on it must stay under the same licence and ship its source.
+
+Copyright (c) 2026 James Simpson
