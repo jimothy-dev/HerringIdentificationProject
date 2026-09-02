@@ -6,3 +6,6 @@ models/*.pt
 data/scene_cache/
 data/scene_availability.json
 data/exports/
+.env
+.env.*
+*.pem

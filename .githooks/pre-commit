@@ -1,0 +1,17 @@
+#!/bin/sh
+# Blocks commits whose staged changes contain likely secrets/tokens.
+# Covers: Hugging Face (hf_), GitHub (ghp_/gho_/ghu_/ghs_/ghr_), OpenAI-style
+# (sk-), Google API (AIza) and OAuth (ya29.), AWS access keys (AKIA/ASIA),
+# Anthropic (sk-ant-), Slack (xox), and PEM private key blocks.
+patterns='hf_[A-Za-z0-9]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9_-]{24,}|AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|(AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+hits=$(git diff --cached -U0 | grep -E '^\+' | grep -EIn "$patterns" | head -5)
+if [ -n "$hits" ]; then
+  echo "" >&2
+  echo "COMMIT BLOCKED: staged changes look like they contain a secret/token:" >&2
+  echo "$hits" | sed 's/^/  /' >&2
+  echo "" >&2
+  echo "Remove the secret (put it in an ignored file or your user profile)." >&2
+  echo "False positive? Commit with: git commit --no-verify" >&2
+  exit 1
+fi
+exit 0
