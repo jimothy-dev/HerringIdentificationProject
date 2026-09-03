@@ -1,5 +1,13 @@
 # Herring Spawn Labeler
 
+**Highlights**
+
+- Turns ~3,000 DFO Pacific herring spawn records (2016+) into a labelled satellite training set: Sentinel-2 and Landsat 8/9 scenes pulled from Google Earth Engine for the days around each spawn, labelled in a keyboard-driven web UI, exported as 10 m / 30 m multiband GeoTIFF chips plus `labels.csv`. 313 scenes labelled so far.
+- Segment mode: click a feature and SAM 3 (SAM 2.1 fallback) outlines it with point prompts; a per-segment spawn score (spectral heuristic now, swappable for a trained classifier at `models/spawn_classifier.pt`) reports area and likelihood.
+- Built for the real constraints: thumbnails fetched only after cloud filtering, a single-model inference lock for a shared 6 GB GPU, encoder outputs LRU-cached so repeat clicks take ~10-40 ms, and a full mock mode when Earth Engine credentials are absent.
+
+**Stack:** Python 3 · FastAPI + Uvicorn · Google Earth Engine (`earthengine-api`) · PyTorch + Hugging Face Transformers (SAM 3 / SAM 2.1) · pandas · Pillow · vanilla JavaScript frontend · GeoTIFF chips
+
 A local app for building a training dataset of Pacific herring spawns as seen from satellite. Spawn shows up as milky turquoise water along the coast for a few days around each event. The app takes DFO's spawn index records (2016+, ~3,000 usable), pulls Sentinel-2 and Landsat 8/9 scenes from Google Earth Engine for the days around each spawn, and lets you label them positive or negative. Labels go to `data/labels.csv`; labeled scenes also download a multiband GeoTIFF chip to `data/chips/` for training.
 
 ## Running it
